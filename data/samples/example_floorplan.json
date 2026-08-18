@@ -1,0 +1,199 @@
+{
+  "project_id": "SAMPLE-001",
+  "units": "feet",
+  "rooms": [
+    {
+      "id": "room-1",
+      "confidence": 0.96,
+      "source": "ai_detection",
+      "metadata": {},
+      "name": "Living Room",
+      "polygon": [
+        { "x": 0, "y": 0 },
+        { "x": 14, "y": 0 },
+        { "x": 14, "y": 16 },
+        { "x": 0, "y": 16 }
+      ],
+      "room_type": "living_room"
+    },
+    {
+      "id": "room-2",
+      "confidence": 0.95,
+      "source": "ai_detection",
+      "metadata": {},
+      "name": "Bedroom",
+      "polygon": [
+        { "x": 14, "y": 0 },
+        { "x": 24, "y": 0 },
+        { "x": 24, "y": 16 },
+        { "x": 14, "y": 16 }
+      ],
+      "room_type": "bedroom"
+    }
+  ],
+  "walls": [
+    {
+      "id": "wall-1",
+      "confidence": 0.98,
+      "source": "ai_detection",
+      "metadata": {},
+      "start": { "x": 0, "y": 0 },
+      "end": { "x": 24, "y": 0 },
+      "thickness": 0.5,
+      "height": 9,
+      "wall_type": "exterior"
+    },
+    {
+      "id": "wall-2",
+      "confidence": 0.98,
+      "source": "ai_detection",
+      "metadata": {},
+      "start": { "x": 24, "y": 0 },
+      "end": { "x": 24, "y": 16 },
+      "thickness": 0.5,
+      "height": 9,
+      "wall_type": "exterior"
+    },
+    {
+      "id": "wall-3",
+      "confidence": 0.97,
+      "source": "ai_detection",
+      "metadata": {},
+      "start": { "x": 24, "y": 16 },
+      "end": { "x": 0, "y": 16 },
+      "thickness": 0.5,
+      "height": 9,
+      "wall_type": "exterior"
+    },
+    {
+      "id": "wall-4",
+      "confidence": 0.97,
+      "source": "ai_detection",
+      "metadata": {},
+      "start": { "x": 0, "y": 16 },
+      "end": { "x": 0, "y": 0 },
+      "thickness": 0.5,
+      "height": 9,
+      "wall_type": "exterior"
+    },
+    {
+      "id": "wall-5",
+      "confidence": 0.93,
+      "source": "ai_detection",
+      "metadata": {},
+      "start": { "x": 14, "y": 0 },
+      "end": { "x": 14, "y": 16 },
+      "thickness": 0.33,
+      "height": 9,
+      "wall_type": "interior"
+    }
+  ],
+  "doors": [
+    {
+      "id": "door-1",
+      "confidence": 0.9,
+      "source": "ai_detection",
+      "metadata": {},
+      "wall_id": "wall-1",
+      "position": 0.2,
+      "width": 3,
+      "height": 6.83,
+      "swing": "right"
+    },
+    {
+      "id": "door-2",
+      "confidence": 0.87,
+      "source": "ai_detection",
+      "metadata": {},
+      "wall_id": "wall-5",
+      "position": 0.5,
+      "width": 2.83,
+      "height": 6.83,
+      "swing": "left"
+    }
+  ],
+  "windows": [
+    {
+      "id": "window-1",
+      "confidence": 0.91,
+      "source": "ai_detection",
+      "metadata": {},
+      "wall_id": "wall-2",
+      "position": 0.3,
+      "width": 3,
+      "height": 4,
+      "sill_height": 3
+    },
+    {
+      "id": "window-2",
+      "confidence": 0.89,
+      "source": "ai_detection",
+      "metadata": {},
+      "wall_id": "wall-3",
+      "position": 0.7,
+      "width": 4,
+      "height": 4,
+      "sill_height": 3
+    }
+  ],
+  "stairs": [
+    {
+      "id": "stair-1",
+      "confidence": 0.81,
+      "source": "ai_detection",
+      "metadata": {},
+      "polygon": [
+        { "x": 20, "y": 12 },
+        { "x": 23, "y": 12 },
+        { "x": 23, "y": 15 },
+        { "x": 20, "y": 15 }
+      ],
+      "step_count": 13,
+      "direction": "down"
+    }
+  ],
+  "dimensions": [
+    {
+      "id": "dim-1",
+      "confidence": 0.88,
+      "source": "ai_detection",
+      "metadata": {},
+      "start": { "x": 0, "y": -1 },
+      "end": { "x": 24, "y": -1 },
+      "value": 24,
+      "label": "24'-0\""
+    },
+    {
+      "id": "dim-2",
+      "confidence": 0.86,
+      "source": "ai_detection",
+      "metadata": {},
+      "start": { "x": -1, "y": 0 },
+      "end": { "x": -1, "y": 16 },
+      "value": 16,
+      "label": "16'-0\""
+    }
+  ],
+  "furniture": [
+    {
+      "id": "furniture-1",
+      "confidence": null,
+      "source": "manual_correction",
+      "metadata": {},
+      "furniture_type": "bed",
+      "position": { "x": 19, "y": 4 },
+      "rotation": 0,
+      "width": 5,
+      "depth": 6.5,
+      "height": 2,
+      "room_id": "room-2"
+    }
+  ],
+  "metadata": {
+    "building_name": "Sample Cottage",
+    "detection_version": null,
+    "source_image_reference": null,
+    "notes": "Hand-authored fixture for Prompt 4 schema validation -- not derived from a real AI detection run.",
+    "extra": {}
+  }
+}

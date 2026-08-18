@@ -1,0 +1,45 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    @apply antialiased;
+  }
+
+  body {
+    @apply bg-paper text-graphite font-body;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4 {
+    @apply font-display text-ink;
+  }
+
+  /* Visible keyboard focus everywhere -- not just on inputs. */
+  :focus-visible {
+    @apply outline-none ring-2 ring-blueprint ring-offset-2 ring-offset-paper;
+  }
+}
+
+@layer utilities {
+  /* Thin blueprint-grid texture used sparingly as a background accent. */
+  .bg-blueprint-grid {
+    background-image: linear-gradient(rgba(79, 182, 232, 0.08) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(79, 182, 232, 0.08) 1px, transparent 1px);
+    background-size: 24px 24px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
