@@ -1,6 +1,7 @@
 # DEVELOPMENT_STATUS.md
 
-Running log of completed, in-progress, and pending work. Updated after every development milestone. Most recent entry at the top.
+Running log of completed, in-progress, and pending work. Updated after every prompt using the standard
+`PROMPT STATUS` block. Most recent entry at the top.
 
 ---
 
@@ -8,8 +9,8 @@ Running log of completed, in-progress, and pending work. Updated after every dev
 
 | Phase | Days | Status |
 |---|---|---|
-| 1. Foundation | 1–2 | 🟢 Complete (4 tasks complete) |
-| 2. AI Detection | 3–5 | 🟡 In Progress (1 of 4 tasks complete) |
+| 1. Foundation | 1–2 | 🟢 Complete (4 of 4 prompts) |
+| 2. AI Detection | 3–5 | 🟡 In Progress (Prompt 6 done — 2 of 4 complete) |
 | 3. Manual Correction | 6–8 | ⬜ Not Started |
 | 4. 2D → 3D | 9–14 | ⬜ Not Started |
 | 5. Walkthrough + Visuals | 15–17 | ⬜ Not Started |
@@ -21,13 +22,138 @@ Running log of completed, in-progress, and pending work. Updated after every dev
 
 ---
 
-## Development Log
+## Prompt Log
 
-### Task 5 — Analyze and Design the Floor Plan Detection Pipeline
+### Prompt 6 — Implement Computer Vision Detection and OCR
 
 ```
-DEVELOPMENT STATUS
-- Task number: 5
+PROMPT STATUS
+- Prompt number: 6
+- Status: Complete
+- Files created:
+  - backend/app/cv/preprocessing.py (load/rasterize PNG/JPG/PDF, resize to
+    working resolution, grayscale, denoise, adaptive-threshold binarize,
+    Hough-based deskew)
+  - backend/app/cv/detector.py (wall detection via morphology + Hough lines
+    with collinear-segment merging and gap/opening extraction; room
+    derivation via wall-mask contour extraction; tiered door/window
+    classification via swing-leaf heuristic; stair detection via parallel
+    tread-line clustering; full pipeline orchestration in
+    run_detection_pipeline())
+  - backend/app/cv/postprocessing.py (confidence scoring per element type,
+    room-to-boundary-wall association, door/window NMS, two-path unit
+    calibration: OCR-matched dimension preferred, documented fallback
+    assumption otherwise)
+  - backend/app/ocr/ocr_service.py (EasyOCR-primary/Tesseract-fallback dual
+    backend, word-to-line grouping with gap-based re-splitting, dimension
+    pattern parsing, room-keyword classification, point-in-polygon room
+    label association, dimension-to-geometry association)
+  - backend/tests/test_detection.py (40 tests: preprocessing, wall/room/
+    opening/stair detection on 2 sample images, OCR extraction/
+    classification/association, calibration, and 8 full end-to-end
+    pipeline tests validated against the real Prompt 4 schema validator)
+  - scripts/generate_sample_floorplans.py (generates the 2 synthetic sample
+    floor plan images -- see that script's docstring for why synthetic
+    fixtures were used instead of real scans)
+  - data/samples/sample_floorplan_cottage.png, sample_floorplan_studio.png
+    (the 2 sample images required by this prompt's file list)
+- Files modified:
+  - backend/requirements.txt (added opencv-python, numpy, Pillow, shapely,
+    pytesseract, PyMuPDF; easyocr intentionally NOT pinned -- see Known
+    issues)
+  - docs/DEVELOPMENT_STATUS.md (this entry)
+- Tests executed:
+  - pytest backend/tests/test_detection.py (40 tests)
+  - pytest backend/tests/ (full suite, 62 tests) -- regression check,
+    confirms Prompts 2 and 4's tests are unaffected
+  - Full pipeline run against both sample images with output printed and
+    manually inspected against the known ground truth of each synthetic
+    drawing (element counts, room names, dimension values, wall/room
+    classifications)
+- Tests passed: 62/62 (40 new + 22 from Prompts 2 and 4)
+- Known issues / decisions made during implementation:
+  - **Tier 1 resolved to "not implemented," as Prompt 5 anticipated.** A
+    generic pretrained object detector (e.g. COCO-trained YOLOv8n) does not
+    include door/window/stair symbol classes at all, so it would add a
+    heavy dependency for no real detection benefit. Tier 2 (classical
+    heuristics) is the sole detection strategy for these elements, exactly
+    as Prompt 5's design allowed for. Full reasoning is in detector.py's
+    module docstring.
+  - **EasyOCR was not exercised live in this environment** -- only
+    Tesseract was. `ocr_service.py` implements both paths exactly as
+    designed (try EasyOCR, fall back to Tesseract on any failure including
+    a blocked model-weight download), but EasyOCR was not installed in this
+    sandbox to avoid an unreliable, heavy first-run network dependency
+    during development. `get_ocr_backend_name()` reports which path ran;
+    all live testing reports "tesseract". Stated honestly rather than
+    claiming both paths were verified.
+  - **Six real bugs were found and fixed during implementation** (not just
+    written and assumed correct) by actually running the pipeline against
+    the sample images and inspecting output against known ground truth:
+    1. Stair tread lines (55px) survived the wall-isolation morphology
+       filter because they exceeded the original 25px kernel length --
+       increased kernel to 70px.
+    2. A thin (1px) dimension line survived the same filter by running the
+       building's full length -- added a minimum wall-thickness filter,
+       and (constructively) repurposed the filtered-out thin lines as
+       dimension-line candidate geometry for OCR association, rather than
+       simply discarding them.
+    3. Room detection counted a RETR_CCOMP hierarchy artifact (a "hole"
+       representing the wall silhouette within the background region) as a
+       spurious third room -- fixed by only accepting top-level contours.
+    4. The stair heuristic's cluster-proximity check let scattered OCR text
+       strokes at a similar y-height pass as a false stair region -- fixed
+       by deduplicating near-identical Hough fragments of the same
+       physical line before checking spacing regularity, length
+       similarity, and along-axis compactness.
+    5. Exterior/interior wall classification checked a wall's coordinates
+       against all four boundary extents rather than only its own
+       perpendicular axis, misclassifying the interior dividing wall (which
+       spans nearly the full building height) as exterior.
+    6. Wall-line grouping used naive `round(offset / tolerance)` bucketing,
+       which split two genuinely close line offsets (682.0 and 684.3 with
+       tolerance=8) into duplicate walls because they rounded into
+       different buckets -- replaced with real chained proximity
+       clustering, which has no such boundary-straddling failure mode.
+    Each fix has a corresponding regression test in test_detection.py
+    (see the "Regression test:" docstrings) so these don't silently
+    reappear in later prompts.
+  - **Multi-word/same-row OCR text required two additional fixes beyond the
+    obvious per-word fragmentation**: Tesseract's own line-grouping (a)
+    fragments multi-word labels into per-word blocks by default (fixed by
+    grouping words sharing Tesseract's own block/paragraph/line indices),
+    and (b) can still wrongly merge two separate labels that happen to sit
+    at the same y-height into one "line" (fixed by re-splitting on large
+    horizontal gaps between consecutive words).
+  - Confidence scores on the synthetic fixtures are uniformly high (walls:
+    1.0, rooms: 1.0) since the clean synthetic line art gives complete
+    Hough coverage -- real scanned/hand-drawn plans will show meaningfully
+    more varied confidence, which is expected and matches
+    DETECTION_PIPELINE.md's documented MVP-accuracy expectations.
+  - PDF input (`preprocessing._load_pdf_first_page`, via PyMuPDF) is
+    implemented per the design but not exercised by any test -- no sample
+    PDF floor plan was available to generate. Only PNG input was tested.
+- Documentation updated: docs/DEVELOPMENT_STATUS.md (this entry). No
+  changes needed to DETECTION_PIPELINE.md or ARCHITECTURE.md -- the Prompt 5
+  design held up through implementation without requiring a design
+  revision (Tier 1's resolution was already anticipated as an open
+  question there, not a deviation from it).
+- Dependencies for next prompt: None blocking. Prompt 7 (Integrate
+  Detection Pipeline with Backend and Frontend) can begin --
+  `detector.run_detection_pipeline(image_path, project_id)` is a
+  self-contained, framework-agnostic function ready to be wired into an
+  upload API endpoint and persisted via `floorplan_service.py`.
+- Recommended next action: Proceed to Prompt 7 — Integrate Detection
+  Pipeline with Backend and Frontend.
+```
+
+---
+
+### Prompt 5 — Analyze and Design the Floor Plan Detection Pipeline
+
+```
+PROMPT STATUS
+- Prompt number: 5
 - Status: Complete
 - Files created:
   - docs/DETECTION_PIPELINE.md (full pipeline design: input limits, preprocessing,
@@ -39,8 +165,8 @@ DEVELOPMENT STATUS
   - docs/ARCHITECTURE.md (Section 6, module #1 — added pointer to
     DETECTION_PIPELINE.md plus a one-line summary of the chosen approach)
   - docs/DEVELOPMENT_STATUS.md (this entry)
-- Tests executed: None (design-only phase, no automated tests required per
-  design phase testing requirements). Design validated via two conceptual
+- Tests executed: None (design-only prompt, no automated tests required per
+  Prompt 5's own Testing Requirements). Design validated via two conceptual
   walkthroughs against sample floor plan scenarios (Section 10 of
   DETECTION_PIPELINE.md) — one clean/synthetic-style input, one degraded
   hand-drawn/skewed input with no dimension text — confirming the design
@@ -48,14 +174,14 @@ DEVELOPMENT STATUS
   outright, and that every FloorPlan field maps to either a defined detection
   source or an explicit, documented "not detectable from a 2D plan view, left
   null" decision.
-- Tests passed: N/A (no automated tests in this task)
+- Tests passed: N/A (no automated tests this prompt)
 - Known issues:
   - Tier 1 (pretrained YOLOv8n door/window/stair detector) availability is an
     explicitly flagged open decision, not a confirmed dependency — whether a
     suitable pretrained checkpoint can actually be sourced/licensed must be
-    resolved before implementation. Tier 2 (classical heuristics) is
+    resolved at the start of Prompt 6. Tier 2 (classical heuristics) is
     documented as always-available fallback specifically so this uncertainty
-    does not block implementation from proceeding.
+    does not block Prompt 6 from proceeding.
   - A real domain-accuracy issue was caught and corrected during this design
     pass: `Door.height`, `Window.height`, and `Window.sill_height` are
     vertical/elevation dimensions that are not visible in a top-down 2D floor
@@ -63,28 +189,29 @@ DEVELOPMENT STATUS
     derivable from a Tier-1 bounding box, which would have been geometrically
     wrong. The document now explicitly states these are always left `null`
     by this pipeline, with defaults applied downstream in Phase 4 -- flagging
-    this so the implementer doesn't spend time chasing a signal that
+    this so Prompt 6's implementer doesn't spend time chasing a signal that
     doesn't exist in the input.
   - EasyOCR's first-run weight download requires network access; Tesseract
-    fallback exists specifically for offline environments.
+    fallback exists specifically for offline environments (relevant given
+    this sandbox's own restricted network access, seen in earlier prompts).
   - No code was written -- backend/app/cv/ and backend/app/ocr/ remain empty,
-    per the explicit "no implementation yet" scope.
+    per this prompt's explicit "no implementation yet" scope.
 - Documentation updated: docs/DETECTION_PIPELINE.md (new), docs/ARCHITECTURE.md
   Section 6 (Detection module pointer), docs/DEVELOPMENT_STATUS.md (this entry)
-- Dependencies for next step: None blocking. Implementation of Computer
-  Vision Detection and OCR can begin -- it should open by resolving the Tier 1
+- Dependencies for next prompt: None blocking. Prompt 6 (Implement Computer
+  Vision Detection and OCR) can begin -- it should open by resolving the Tier 1
   model-availability open decision flagged above before writing detection code.
-- Recommended next action: Proceed to Implementation of Computer Vision
+- Recommended next action: Proceed to Prompt 6 — Implement Computer Vision
   Detection and OCR.
 ```
 
 ---
 
-### Task 4 — Finalize FloorPlan Schema and Verify Foundation
+### Prompt 4 — Finalize FloorPlan Schema and Verify Foundation
 
 ```
-DEVELOPMENT STATUS
-- Task number: 4
+PROMPT STATUS
+- Prompt number: 4
 - Status: Complete
 - Files created:
   - backend/app/floorplan/__init__.py
@@ -111,7 +238,7 @@ DEVELOPMENT STATUS
     references, parse_floorplan() raises correctly, DB round-trip save+reload
     in a fresh session, project-with-no-floorplan defaults to null)
   - pytest backend/tests/ (full suite, 22 tests) — regression check after
-    extending the Project model; all original foundation tests still pass
+    extending the Project model; all of Prompt 2's original tests still pass
   - Live server boot (uvicorn) + GET /health + POST /projects — confirmed
     startup succeeds with the new column and existing endpoints still work
   - Direct SQLite table inspection (PRAGMA table_info) confirming
@@ -125,10 +252,10 @@ DEVELOPMENT STATUS
 - Known issues:
   - Testing Requirement #3 ("API round-trip that saves and retrieves the
     example FloorPlan JSON") was satisfied at the database/service layer via
-    a direct SQLAlchemy session, not over HTTP. This task's own
+    a direct SQLAlchemy session, not over HTTP. This prompt's own
     Files/Folders list does not include a new route file for raw FloorPlan
-    CRUD -- that's introduced alongside detection and correction
-    in Phase 2/3. Documented here rather than silently
+    CRUD -- that's introduced alongside detection (Prompt 7) and correction
+    (Prompt 11) in Phase 2/3. Documented here rather than silently
     reinterpreting scope.
   - `floorplan_data` is a single "current" document per project, not a
     version history. Phase 2/3 will need to decide how raw-detection output
@@ -136,26 +263,26 @@ DEVELOPMENT STATUS
     (e.g. overwrite-in-place vs. separate versions) without changing the
     column's type or name.
   - No Alembic migration exists yet for the new column (consistent with the
-    known issue already logged in Task 2 -- `init_db()` still uses
+    known issue already logged in Prompt 2 -- `init_db()` still uses
     `Base.metadata.create_all()`).
 - Documentation updated: docs/FLOORPLAN_SCHEMA.md (new), docs/ARCHITECTURE.md
   Section 4 already anticipated this schema and required no changes,
   docs/DEVELOPMENT_STATUS.md (this entry, Phase 1 marked complete)
-- Dependencies for next step: None blocking. Phase 1 (Foundation) is now
-  fully complete. Task 5 (Analyze and Design the Floor Plan Detection
+- Dependencies for next prompt: None blocking. Phase 1 (Foundation) is now
+  fully complete. Prompt 5 (Analyze and Design the Floor Plan Detection
   Pipeline) can begin -- it consumes this exact FloorPlan contract as its
   target output shape.
-- Recommended next action: Proceed to Task 5 — Analyze and Design the Floor
-  Plan Detection Pipeline.
+- Recommended next action: Proceed to Prompt 5 — Analyze and Design the Floor
+  Plan Detection Pipeline (first prompt of Phase 2).
 ```
 
 ---
 
-### Task 3 — Implement Frontend Foundation and Backend Integration
+### Prompt 3 — Implement Frontend Foundation and Backend Integration
 
 ```
-DEVELOPMENT STATUS
-- Task number: 3
+PROMPT STATUS
+- Prompt number: 3
 - Status: Complete
 - Files created:
   - frontend/vite.config.ts, frontend/tsconfig.json, frontend/tailwind.config.js,
@@ -172,7 +299,7 @@ DEVELOPMENT STATUS
     Sustainability}/ (placeholder page + index.ts each, per "no feature content
     yet" constraint)
 - Files modified:
-  - frontend/src/App.tsx (routing + Layout wiring; was an empty stub from initial setup)
+  - frontend/src/App.tsx (routing + Layout wiring; was an empty stub from Prompt 1)
   - frontend/package.json (populated; was an empty stub)
   - frontend/.env.example (populated; was an empty stub)
   - .gitignore (bug fix — `.env.*` was accidentally excluding `.env.example` for
@@ -196,28 +323,30 @@ DEVELOPMENT STATUS
     production bundling, per-module transform checks via the dev server, and
     direct backend integration checks (CORS + live data fetch). This is strong
     but not 100% equivalent to an actual rendered-DOM/console check — recommend
-    a quick manual `npm run dev` + browser check on your end before Task 4.
+    a quick manual `npm run dev` + browser check on your end before Prompt 4.
   - Project selection state (useProject) is session-only (sessionStorage-backed
     in-memory Context) — no persistence beyond the browser tab, which is
-    sufficient for Task 3's scope but will need revisiting once multi-page
-    workflows (full Upload→Export flow) depend on it more heavily.
+    sufficient for Prompt 3's scope but will need revisiting once multi-page
+    workflows (Prompt 35, full Upload→Export flow) depend on it more heavily.
 - Documentation updated: docs/DEVELOPMENT_STATUS.md (this entry)
-- Dependencies for next step: None blocking. Task 4 (Finalize FloorPlan Schema
+- Dependencies for next prompt: None blocking. Prompt 4 (Finalize FloorPlan Schema
   and Verify Foundation) can begin — backend Pydantic schemas and frontend
   TypeScript types both need the canonical FloorPlan contract defined; the
   existing frontend/src/types/project.ts pattern should be followed for the new
   frontend/src/types/floorplan.ts.
-- Recommended next action: Proceed to Task 4 — Finalize FloorPlan Schema and
-  Verify Foundation.
+- Recommended next action: Proceed to Prompt 4 — Finalize FloorPlan Schema and
+  Verify Foundation. Suggest a quick manual smoke test (npm run dev + open in an
+  actual browser) on your end first, given this sandbox couldn't run a headless
+  browser check.
 ```
 
 ---
 
-### Task 2 — Implement Backend and Core Project Foundation
+### Prompt 2 — Implement Backend and Core Project Foundation
 
 ```
-DEVELOPMENT STATUS
-- Task number: 2
+PROMPT STATUS
+- Prompt number: 2
 - Status: Complete
 - Files created:
   - backend/app/core/config.py
@@ -234,9 +363,9 @@ DEVELOPMENT STATUS
   - __init__.py package markers: app/, app/core/, app/api/, app/api/routes/,
     app/models/, app/schemas/, app/services/, tests/
 - Files modified:
-  - backend/app/main.py (implemented app entry point; was an empty stub from initial setup)
-  - backend/requirements.txt (populated; was an empty stub from initial setup)
-  - backend/.env.example (populated; was an empty stub from initial setup)
+  - backend/app/main.py (implemented app entry point; was an empty stub from Prompt 1)
+  - backend/requirements.txt (populated; was an empty stub from Prompt 1)
+  - backend/.env.example (populated; was an empty stub from Prompt 1)
 - Tests executed:
   - pytest backend/tests/test_foundation.py (7 tests: root, health, create/list project,
     get by id, 404 error format, 422 validation error format, update/delete round-trip)
@@ -248,53 +377,53 @@ DEVELOPMENT STATUS
   {"error": {"code","message","details"}} shape).
 - Known issues:
   - No Alembic/migration tool yet — init_db() uses Base.metadata.create_all() as an MVP
-    convenience. Acceptable for now per Task 2 scope; should be revisited if schema
-    migrations become necessary before Task 4 finalizes the FloorPlan schema.
+    convenience. Acceptable for now per Prompt 2 scope; should be revisited if schema
+    migrations become necessary before Prompt 4 finalizes the FloorPlan schema.
   - requirements.txt pins psycopg2-binary for PostgreSQL, but local dev/testing in this
     environment used a SQLite DATABASE_URL (no Postgres instance available in sandbox).
     database.py handles both via a DATABASE_URL-driven engine, but real PostgreSQL
     connectivity has not been exercised — only SQLite has been verified.
 - Documentation updated: docs/DEVELOPMENT_STATUS.md (this entry)
-- Dependencies for next step: None blocking. Task 3 (Implement Frontend Foundation and
+- Dependencies for next prompt: None blocking. Prompt 3 (Implement Frontend Foundation and
   Backend Integration) can begin — GET /projects, POST /projects are live and ready for the
   frontend API client to call.
-- Recommended next action: Proceed to Task 3 — Implement Frontend Foundation and Backend
+- Recommended next action: Proceed to Prompt 3 — Implement Frontend Foundation and Backend
   Integration. Before production deployment, verify against a real PostgreSQL instance
-  (not just SQLite) and consider introducing Alembic migrations ahead of Task 4.
+  (not just SQLite) and consider introducing Alembic migrations ahead of Prompt 4.
 ```
 
 ---
 
-### Task 1 — Analyze Existing Project and Finalize Architecture
+### Prompt 1 — Analyze Existing Project and Finalize Architecture
 
 ```
-DEVELOPMENT STATUS
-- Task number: 1
+PROMPT STATUS
+- Prompt number: 1
 - Status: Complete
 - Files created: docs/ARCHITECTURE.md, docs/PROJECT_MASTER.md, docs/DEVELOPMENT_STATUS.md,
   backend/.gitkeep, frontend/.gitkeep, models/.gitkeep, assets/.gitkeep, data/.gitkeep,
   tests/.gitkeep, scripts/.gitkeep, docker/.gitkeep
 - Files modified: (none — greenfield project, nothing existed to modify)
-- Tests executed: Manual self-check only (per task scope — no automated tests apply to a
-  documentation/planning task)
+- Tests executed: Manual self-check only (per prompt scope — no automated tests apply to a
+  documentation/planning prompt)
 - Tests passed:
   - Architecture document covers all 10 phases/subsystems: PASS
   - FloorPlan contract fields are complete and consistent with source spec: PASS
   - No module has an undefined input/output (Section 10 self-check): PASS
-- Known issues: None. Repository was confirmed empty before project creation — no legacy code,
+- Known issues: None. Repository was confirmed empty before this prompt — no legacy code,
   conflicting structure, or naming inconsistencies to reconcile.
 - Documentation updated: docs/ARCHITECTURE.md (created), docs/PROJECT_MASTER.md (created),
   docs/DEVELOPMENT_STATUS.md (created, this file)
-- Dependencies for next step: None blocking. Task 2 (Implement Backend and Core Project
+- Dependencies for next prompt: None blocking. Prompt 2 (Implement Backend and Core Project
   Foundation) can begin immediately using the architecture defined here.
-- Recommended next action: Proceed to Task 2 — Implement Backend and Core Project Foundation.
+- Recommended next action: Proceed to Prompt 2 — Implement Backend and Core Project Foundation.
 ```
 
 ---
 
 ## Known Limitations Register
 
-*(Populated progressively as phases complete. Carried into the final documentation pass.)*
+*(Populated progressively as phases complete. Carried into the final Prompt 40 documentation pass.)*
 
 | Area | Limitation | Introduced In |
 |---|---|---|

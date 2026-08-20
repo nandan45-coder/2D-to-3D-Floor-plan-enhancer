@@ -1,4 +1,4 @@
-
+# Backend Foundation -- Prompt 2
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
 pydantic==2.10.4
@@ -7,6 +7,19 @@ SQLAlchemy==2.0.36
 psycopg2-binary==2.9.10
 python-dotenv==1.0.1
 python-multipart==0.0.20
+
+opencv-python-headless==4.13.0.92
+numpy==2.4.4
+Pillow==12.1.1
+shapely==2.1.2
+pytesseract==0.3.13   # offline OCR fallback -- requires the `tesseract-ocr` system package
+PyMuPDF==1.28.2        # PDF rasterization (first page only, per DETECTION_PIPELINE.md)
+# easyocr is intentionally NOT pinned here yet: it pulls in a full PyTorch
+# dependency and downloads model weights on first use, both impractical to
+# verify in this environment. ocr_service.py already tries `import easyocr`
+# first and falls back to pytesseract automatically -- add `easyocr` to this
+# file whenever a network-enabled deployment target needs the primary path
+# exercised. See docs/DEVELOPMENT_STATUS.md's Prompt 6 entry for details.
 
 # Testing
 pytest==8.3.4
