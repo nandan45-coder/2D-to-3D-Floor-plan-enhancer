@@ -8,13 +8,14 @@ what keeps routers "easy to add to without editing unrelated files."
 """
 from fastapi import APIRouter
 
-from app.api.routes import projects
+from app.api.routes import detection, projects
 from app.core.config import settings
 from app.core.database import check_database_connection
 
 api_router = APIRouter()
 
 api_router.include_router(projects.router)
+api_router.include_router(detection.router)
 
 
 @api_router.get("/health", tags=["health"])

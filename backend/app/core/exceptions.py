@@ -27,3 +27,21 @@ class NotFoundError(AppError):
 class ValidationAppError(AppError):
     code = "VALIDATION_ERROR"
     status_code = 422
+
+
+class UnsupportedMediaTypeError(AppError):
+    """Raised when an uploaded file's type isn't supported (e.g. wrong extension)."""
+    code = "UNSUPPORTED_MEDIA_TYPE"
+    status_code = 415
+
+
+class PayloadTooLargeError(AppError):
+    """Raised when an uploaded file exceeds the configured size limit."""
+    code = "PAYLOAD_TOO_LARGE"
+    status_code = 413
+
+
+class ConflictError(AppError):
+    """Raised when a request is valid but the resource isn't in the right state yet (e.g. detection result requested before detection has completed)."""
+    code = "CONFLICT"
+    status_code = 409

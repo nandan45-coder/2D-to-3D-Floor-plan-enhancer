@@ -39,6 +39,10 @@ node_modules/
 *.tsbuildinfo
 .vite/
 
+# Uploaded floor plan files (Prompt 7) -- user data, not source
+backend/data/uploads/
+data/uploads/
+
 # ChromaDB / local databases
 chroma/
 chroma_db/

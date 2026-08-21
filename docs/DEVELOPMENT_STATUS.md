@@ -10,7 +10,7 @@ Running log of completed, in-progress, and pending work. Updated after every pro
 | Phase | Days | Status |
 |---|---|---|
 | 1. Foundation | 1–2 | 🟢 Complete (4 of 4 prompts) |
-| 2. AI Detection | 3–5 | 🟡 In Progress (Prompt 6 done — 2 of 4 complete) |
+| 2. AI Detection | 3–5 | 🟡 In Progress (Prompt 7 done — 3 of 4 complete) |
 | 3. Manual Correction | 6–8 | ⬜ Not Started |
 | 4. 2D → 3D | 9–14 | ⬜ Not Started |
 | 5. Walkthrough + Visuals | 15–17 | ⬜ Not Started |
@@ -23,6 +23,134 @@ Running log of completed, in-progress, and pending work. Updated after every pro
 ---
 
 ## Prompt Log
+
+### Prompt 7 — Integrate Detection Pipeline with Backend and Frontend
+
+```
+PROMPT STATUS
+- Prompt number: 7
+- Status: Complete
+- Files created:
+  - backend/app/services/storage_service.py (validates + saves uploaded
+    files to STORAGE_PATH/{project_id}/{uuid}.{ext}; streams to disk in
+    chunks with a size check as it goes, not trusting client-provided
+    Content-Length; reuses SUPPORTED_EXTENSIONS/MAX_UPLOAD_BYTES from
+    Prompt 6's preprocessing.py rather than redefining limits)
+  - backend/app/services/floorplan_service.py (owns all reads/writes of
+    Project.floorplan_data; every save goes through Prompt 4's
+    parse_floorplan() validator first -- an invalid FloorPlan is never
+    persisted, regardless of caller; also owns detection_status/
+    detection_error read/write)
+  - backend/app/schemas/detection.py (DetectionStatusResponse,
+    DetectionSummary, DetectionUploadResponse)
+  - backend/app/api/routes/detection.py (POST .../upload combines upload+
+    trigger synchronously per the prompt's own "simple synchronous response
+    acceptable for MVP" allowance; GET .../status and GET .../result are
+    separate so the frontend can re-query without re-uploading)
+  - backend/tests/test_detection_api.py (12 tests: status defaults,
+    404/409/415/413 error paths, full upload-through-result round trip on
+    both sample images, schema validation of the returned result,
+    persistence-across-requests check, failed-detection handling)
+  - backend/tests/conftest.py (shared test DB/client fixtures -- see "Known
+    issues" below, this fixes a real cross-file test-isolation bug)
+  - frontend/src/pages/Upload/Upload.tsx (full rewrite from Prompt 3's
+    placeholder: drag-drop + click-to-browse file picker, client-side
+    extension check, local image preview via object URL, upload/loading
+    state, detected-element-count summary display, calibration/notes
+    surfaced to the user, distinct UI states for request-level errors vs.
+    detection-level failures vs. success)
+- Files modified:
+  - backend/app/models/project.py (added `detection_status` /
+    `detection_error` columns -- ANOTHER schema change on top of Prompt 4's
+    floorplan_data; see "Known issues")
+  - backend/app/core/exceptions.py (added UnsupportedMediaTypeError (415),
+    PayloadTooLargeError (413), ConflictError (409), following the existing
+    AppError subclass pattern from Prompt 2)
+  - backend/app/api/router.py (wired in the detection router)
+  - backend/tests/test_foundation.py (refactored to use conftest.py's
+    shared `client` fixture instead of its own local DB/override setup)
+  - .gitignore (added backend/data/uploads/ -- uploaded user files should
+    never be committed)
+  - frontend/src/services/api.ts (added uploadFloorPlan, getDetectionStatus,
+    getDetectionResult; documented the axios `Content-Type: undefined`
+    override needed for multipart requests to work alongside the client's
+    default JSON Content-Type)
+  - docs/DEVELOPMENT_STATUS.md (this entry)
+- Tests executed:
+  - pytest backend/tests/ (full suite) -- run 3 times consecutively to
+    confirm the conftest.py fix actually resolved the isolation bug
+    (74/74 passed, stable across all 3 runs)
+  - Live backend: booted fresh, full curl-based walkthrough of upload ->
+    status -> result for a real project, plus every error path (409 before
+    upload, 415 wrong file type, 413 oversized file with on-disk partial-
+    file cleanup verified, 404 nonexistent project)
+  - Live multipart integration test via a small Node/axios script exercising
+    the exact `Content-Type: undefined` override pattern used in
+    frontend/src/services/api.ts against the real running backend --
+    confirmed the backend correctly parses the multipart body and runs
+    detection end-to-end (2 rooms, 5 walls, 2 doors, 1 window, 1 stair,
+    matching the Prompt 6 ground truth exactly)
+  - `npm run build` (tsc --noEmit + vite build) -- clean, 102 modules
+  - Vite dev server per-module transform check on every new/modified
+    frontend file (Upload.tsx, api.ts) -- no runtime import errors
+  - CORS preflight (OPTIONS) verified from http://localhost:5173 against
+    the new POST .../upload endpoint specifically (not just the endpoints
+    already covered in Prompt 3)
+- Tests passed: 74/74 backend (12 new + 62 from Prompts 2/4/6), frontend
+  build clean, all live integration checks passed
+- Known issues:
+  - **Another schema change on Project** (`detection_status`,
+    `detection_error`) -- same class of issue already flagged in Prompts 2
+    and 4: `init_db()` still uses `Base.metadata.create_all()`, which does
+    not alter existing tables. An existing `dev.db` from before this prompt
+    must be deleted and regenerated, exactly as happened after Prompt 4 (the
+    user hit this directly; see the conversation immediately before this
+    prompt). Deferred to Prompt 39 per the standing decision, not fixed
+    here since the user explicitly chose to keep deferring it.
+  - **Found and fixed a real cross-file test-isolation bug** while adding
+    test_detection_api.py: `app.dependency_overrides[get_db]` is a single
+    dict entry on the process-wide FastAPI `app` object. test_foundation.py
+    (Prompt 2) and the new test_detection_api.py each independently created
+    their own SQLite engine and assigned that override at module level.
+    Since pytest imports every test module during collection before running
+    any test, whichever file imported LAST silently won that override for
+    ALL test files -- including ones whose own tables were never created
+    against that engine. This surfaced as "no such table: projects"
+    failures that appeared ONLY when the full suite ran together, never
+    when either file ran alone -- exactly the kind of bug that's invisible
+    until enough test files accumulate. Fixed with a shared
+    backend/tests/conftest.py (one engine, one override, defined once);
+    test_foundation.py was refactored to use it. Verified fixed by running
+    the full suite 3 times consecutively.
+  - Upload + detection run synchronously in a single request/single process
+    -- there is no real background job queue, so "processing" status is
+    only meaningfully observable if a second request queries status during
+    the brief window an upload is being handled by another concurrent
+    request. Acceptable per the prompt's own "avoid building a full job
+    queue" constraint; would need revisiting if detection time grows
+    significantly for larger real-world images.
+  - PDF upload is accepted by validation (extension check passes) but,
+    consistent with Prompt 6's own known issues, has still not been
+    exercised end-to-end with a real sample PDF -- no PDF fixture exists.
+  - The Node/axios multipart integration test used the `form-data` npm
+    package (Node's FormData polyfill), not a real browser's native
+    FormData -- this verifies the backend's multipart handling thoroughly
+    (the more uncertain side) but is not a literal browser-based
+    confirmation of the frontend's axios override behavior, consistent with
+    this sandbox's standing inability to run a headless browser (noted
+    already in Prompt 3).
+- Documentation updated: docs/DEVELOPMENT_STATUS.md (this entry). No
+  changes needed to ARCHITECTURE.md or DETECTION_PIPELINE.md.
+- Dependencies for next prompt: None blocking. Prompt 8 (Test and Fix AI
+  Detection) can begin -- it should include a manual/exploratory pass
+  against the now-live upload flow, not just the unit-level tests already
+  in place.
+- Recommended next action: Proceed to Prompt 8 — Test and Fix AI Detection
+  (closes Phase 2). Suggest the user run `rm backend/dev.db` once more
+  before their next manual test, per the schema change noted above.
+```
+
+---
 
 ### Prompt 6 — Implement Computer Vision Detection and OCR
 
