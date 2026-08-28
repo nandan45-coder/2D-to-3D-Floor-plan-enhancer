@@ -65,6 +65,20 @@ STAIR_MAX_LENGTH_RATIO = 1.8  # longest/shortest tread candidate in a cluster
 STAIR_MAX_ALONG_EXTENT_PX = 220.0  # stairs are compact; text rows can span much wider
 STAIR_SPACING_REGULARITY_TOLERANCE = 0.5  # max allowed (stdev / median) of consecutive gaps
 
+# --- Dense-hatch stair reclassification (added during Prompt 8 real-world
+# testing) -- see _reclassify_dense_wall_clusters_as_stairs's docstring for
+# why this exists as a SEPARATE, looser check from the STAIR_* constants
+# above: those were tuned against a clean synthetic tread pattern with
+# evenly-spaced individual lines. A real, denser hatch pattern gets
+# partially consolidated by the same wall-merging tolerance that's supposed
+# to clean up broken scan lines, producing a handful of irregularly-spaced
+# "walls" floating mid-room -- which fails the STRICT regularity check
+# above, but is still clearly not a set of real walls.
+STAIR_RECLASSIFY_MIN_MEMBERS = 4
+STAIR_RECLASSIFY_MAX_SEGMENT_LENGTH_PX = 150.0
+STAIR_RECLASSIFY_MAX_ALONG_EXTENT_PX = 220.0
+STAIR_RECLASSIFY_CLUSTER_TOLERANCE_PX = 150.0
+
 
 def _new_id(prefix: str) -> str:
     return f"{prefix}-{uuid.uuid4().hex[:8]}"
@@ -344,18 +358,203 @@ def classify_exterior_interior(walls: List[WallCandidate]) -> None:
         wall.wall_type = "exterior" if on_boundary else "interior"
 
 
+def _reclassify_dense_wall_clusters_as_stairs(
+    walls: List[WallCandidate],
+) -> Tuple[List[WallCandidate], List["StairCandidate"]]:
+    """
+    Finds clusters of short, same-orientation, interior "walls" packed into
+    a compact bounding box and reclassifies them as a stair region instead.
+
+    Why this exists, concretely (found during Prompt 8 real-world testing,
+    not a hypothetical): a real floor plan's staircase hatch pattern (many
+    closely-spaced tread lines) partially survives wall-isolation and gets
+    consolidated by build_walls()'s gap-merging into a handful of shorter
+    "wall" segments floating in the middle of a room, with IRREGULAR
+    spacing between them (an artifact of how many original tread lines
+    happened to merge together at each point) -- e.g. one real case
+    produced 6 vertical segments at x = 474, 501, 516, 571, 600, 612 with
+    gaps of 27, 14, 55, 28, 12px. That fails detect_stairs()'s strict
+    evenly-spaced-tread check (tuned against clean synthetic tread lines),
+    but is still obviously not a set of real walls: real walls span most of
+    a room's extent and don't cluster 4+ deep in a small pocket.
+
+    This is deliberately a LOOSER, different check than detect_stairs()'s
+    -- compactness and count, not spacing regularity -- rather than trying
+    to make one heuristic handle both the clean-synthetic and messy-real
+    cases equally well.
+
+    Clustering requires BOTH perpendicular proximity AND along-axis range
+    overlap (not perpendicular proximity alone). This was a real bug found
+    while implementing this fix: perpendicular-only single-linkage
+    clustering chained through an unrelated short wall elsewhere in the
+    same house that happened to sit at a similar x-coordinate but a
+    completely different y-range -- pulling it into the cluster, which then
+    failed the compactness bound and silently prevented ANY reclassification.
+    Real stair treads all occupy roughly the same physical footprint, so
+    requiring along-axis overlap is a principled fix, not just a tuned
+    threshold: it's what actually distinguishes "these lines are part of
+    one staircase" from "these lines are merely near each other in one
+    coordinate by coincidence."
+    """
+    remaining: List[WallCandidate] = []
+    stairs: List[StairCandidate] = []
+    consumed_ids: set = set()
+
+    for orientation in ("horizontal", "vertical"):
+        candidates = [
+            w for w in walls
+            if w.orientation == orientation
+            and w.wall_type == "interior"
+            and _segment_length(*w.start, *w.end) <= STAIR_RECLASSIFY_MAX_SEGMENT_LENGTH_PX
+        ]
+        if len(candidates) < STAIR_RECLASSIFY_MIN_MEMBERS:
+            continue
+
+        if orientation == "horizontal":
+            fixed_key = lambda w: (w.start[1] + w.end[1]) / 2
+            along_range = lambda w: (min(w.start[0], w.end[0]), max(w.start[0], w.end[0]))
+        else:
+            fixed_key = lambda w: (w.start[0] + w.end[0]) / 2
+            along_range = lambda w: (min(w.start[1], w.end[1]), max(w.start[1], w.end[1]))
+
+        groups = _cluster_by_proximity_and_overlap(
+            candidates, fixed_key, along_range, STAIR_RECLASSIFY_CLUSTER_TOLERANCE_PX
+        )
+
+        for group in groups:
+            if len(group) < STAIR_RECLASSIFY_MIN_MEMBERS:
+                continue
+            fixed_vals = [fixed_key(w) for w in group]
+            along_extent = max(fixed_vals) - min(fixed_vals)
+            if along_extent > STAIR_RECLASSIFY_MAX_ALONG_EXTENT_PX:
+                continue
+
+            for w in group:
+                consumed_ids.add(w.id)
+            xs = [p[0] for w in group for p in (w.start, w.end)]
+            ys = [p[1] for w in group for p in (w.start, w.end)]
+            polygon = [(min(xs), min(ys)), (max(xs), min(ys)), (max(xs), max(ys)), (min(xs), max(ys))]
+            stairs.append(StairCandidate(id=_new_id("stair"), polygon_px=polygon))
+
+    remaining = [w for w in walls if w.id not in consumed_ids]
+    return remaining, stairs
+
+
+def _cluster_by_proximity_and_overlap(items: list, fixed_key, along_range_fn, tolerance: float) -> List[list]:
+    """
+    Groups items that are BOTH close in `fixed_key` (chained proximity, like
+    _cluster_by_proximity) AND whose `along_range_fn` intervals overlap with
+    at least one other member already in the growing group. Two items close
+    in their perpendicular coordinate but with disjoint along-axis ranges
+    (e.g. different parts of a building) are kept in separate groups even if
+    a proximity-only clustering would have chained them together.
+    """
+    if not items:
+        return []
+    items_sorted = sorted(items, key=fixed_key)
+    groups: List[list] = []
+
+    for item in items_sorted:
+        placed = False
+        for group in groups:
+            last = group[-1]
+            close_enough = abs(fixed_key(item) - fixed_key(last)) <= tolerance
+            if not close_enough:
+                continue
+            item_range = along_range_fn(item)
+            group_ranges = [along_range_fn(g) for g in group]
+            overlaps_any = any(
+                item_range[0] <= gr[1] and item_range[1] >= gr[0] for gr in group_ranges
+            )
+            if overlaps_any:
+                group.append(item)
+                placed = True
+                break
+        if not placed:
+            groups.append([item])
+
+    return groups
+
+
+ENDPOINT_SNAP_TOLERANCE_PX = 15.0
+
+
+def snap_wall_endpoints_to_junctions(walls: List[WallCandidate]) -> None:
+    """
+    Extends each wall's endpoint to precisely meet a nearby perpendicular
+    wall's line, closing small T-junction/corner gaps left by Hough
+    imprecision. Mutates wall.start/wall.end in place.
+
+    This was specified in docs/DETECTION_PIPELINE.md Section 8
+    ("Endpoint snapping... closing tiny gaps") but had never actually been
+    implemented -- a real gap between the design and the code, found during
+    Prompt 8 by rendering and visually inspecting the wall mask used for
+    room-contour extraction on a real (non-synthetic) floor plan: several
+    walls visibly stopped just short of the perpendicular wall they should
+    have met, which breaks the closed-boundary assumption room detection
+    depends on and silently merges what should be separate rooms into one
+    blob (or leaves an ambiguous, un-enclosed gap that gets discarded
+    entirely) -- a direct, confirmed contributor to the room-undercount
+    issue flagged after Prompt 7's real-world testing.
+
+    Only extends an endpoint ALONG its own wall's axis (a vertical wall's
+    endpoint moves only in y, a horizontal wall's only in x) to reach the
+    nearest perpendicular wall whose span passes near that endpoint --
+    deliberately not a general "move any endpoint anywhere" snap, to avoid
+    corrupting a wall's own alignment.
+    """
+    horizontal_walls = [w for w in walls if w.orientation == "horizontal"]
+    vertical_walls = [w for w in walls if w.orientation == "vertical"]
+
+    for v in vertical_walls:
+        vx = (v.start[0] + v.end[0]) / 2
+        for attr in ("start", "end"):
+            ex, ey = getattr(v, attr)
+            best_target_y = None
+            best_distance = ENDPOINT_SNAP_TOLERANCE_PX
+            for h in horizontal_walls:
+                hy = (h.start[1] + h.end[1]) / 2
+                hx_min, hx_max = min(h.start[0], h.end[0]), max(h.start[0], h.end[0])
+                if hx_min - ENDPOINT_SNAP_TOLERANCE_PX <= vx <= hx_max + ENDPOINT_SNAP_TOLERANCE_PX:
+                    distance = abs(ey - hy)
+                    if distance < best_distance:
+                        best_distance = distance
+                        best_target_y = hy
+            if best_target_y is not None:
+                setattr(v, attr, (ex, best_target_y))
+
+    for h in horizontal_walls:
+        hy = (h.start[1] + h.end[1]) / 2
+        for attr in ("start", "end"):
+            ex, ey = getattr(h, attr)
+            best_target_x = None
+            best_distance = ENDPOINT_SNAP_TOLERANCE_PX
+            for v in vertical_walls:
+                vx = (v.start[0] + v.end[0]) / 2
+                vy_min, vy_max = min(v.start[1], v.end[1]), max(v.start[1], v.end[1])
+                if vy_min - ENDPOINT_SNAP_TOLERANCE_PX <= hy <= vy_max + ENDPOINT_SNAP_TOLERANCE_PX:
+                    distance = abs(ex - vx)
+                    if distance < best_distance:
+                        best_distance = distance
+                        best_target_x = vx
+            if best_target_x is not None:
+                setattr(h, attr, (best_target_x, ey))
+
+
 def detect_walls(
     binary_image: np.ndarray,
-) -> Tuple[List[WallCandidate], List[OpeningCandidate], List[Tuple[Point, Point]]]:
+) -> Tuple[List[WallCandidate], List[OpeningCandidate], List[Tuple[Point, Point]], List["StairCandidate"]]:
     """
-    Returns (walls, opening_candidates, thin_line_candidates). The third
-    list holds runs that were long and straight enough to survive the
-    isolation morphology but too thin to be a real wall (filtered by
-    MIN_WALL_THICKNESS_PX) -- exactly what a real dimension line looks like
-    (long, thin, straight). Rather than simply discarding this filtered-out
-    signal, it's returned so the assembly step can offer it to
-    ocr_service.associate_dimensions() as candidate geometry to match
-    dimension text against.
+    Returns (walls, opening_candidates, thin_line_candidates,
+    reclassified_stairs). The third list holds runs that were long and
+    straight enough to survive the isolation morphology but too thin to be
+    a real wall (filtered by MIN_WALL_THICKNESS_PX) -- exactly what a real
+    dimension line looks like (long, thin, straight). Rather than simply
+    discarding this filtered-out signal, it's returned so the assembly step
+    can offer it to ocr_service.associate_dimensions() as candidate
+    geometry to match dimension text against. The fourth list holds any
+    dense clusters of short interior walls reclassified as stairs -- see
+    _reclassify_dense_wall_clusters_as_stairs's docstring.
     """
     wall_mask = isolate_wall_mask(binary_image)
     segments = detect_wall_segments(wall_mask)
@@ -371,8 +570,14 @@ def detect_walls(
     walls = [w for w in walls if w.id not in thin_wall_ids]
     openings = [o for o in openings if o.wall_id not in thin_wall_ids]
 
+    snap_wall_endpoints_to_junctions(walls)
+
     classify_exterior_interior(walls)
-    return walls, openings, thin_line_candidates
+
+    walls, reclassified_stairs = _reclassify_dense_wall_clusters_as_stairs(walls)
+    openings = [o for o in openings if o.wall_id in {w.id for w in walls}]
+
+    return walls, openings, thin_line_candidates, reclassified_stairs
 
 
 # --- Room detection -----------------------------------------------------------
@@ -490,6 +695,170 @@ def detect_openings(
         ))
 
     return detections
+
+
+# --- Window bracket-symbol detection (added during real-world testing) ------
+#
+# Found by investigating a real, confirmed accuracy gap (not a hypothetical):
+# on a real floor plan, most windows are drawn as a small bracket/step-shaped
+# mark positioned just OUTSIDE the wall line, not as a gap/break IN the wall
+# line. The gap-based detect_openings() above has no way to ever find these
+# -- it fundamentally looks for breaks in wall geometry, and this symbol
+# doesn't break the wall at all. This is a different detection strategy,
+# not a tuning fix to the existing one, addressing a real structural blind
+# spot: on the test image, only 4 of an estimated 10+ windows were found by
+# gap-detection alone before this existed.
+
+WINDOW_BRACKET_MIN_DEPTH_PX = 12  # extent perpendicular to the wall (into the search band)
+WINDOW_BRACKET_MAX_DEPTH_PX = 30
+WINDOW_BRACKET_MIN_ALONG_PX = 4  # extent along the wall's own axis
+WINDOW_BRACKET_MAX_ALONG_PX = 35
+WINDOW_BRACKET_SEARCH_DEPTH_PX = 30  # how far outside the wall to look
+WINDOW_BRACKET_SEARCH_MARGIN_PX = 2  # gap from the wall's own edge, to avoid capturing the wall itself
+
+
+@dataclass
+class WindowBracketCandidate:
+    wall_id: str
+    position: float  # normalized 0-1 along the wall
+    size_px: float  # bracket's longer bounding-box dimension, used as a width proxy
+
+
+def _building_center(walls: List[WallCandidate]) -> Point:
+    all_x = [p[0] for w in walls for p in (w.start, w.end)]
+    all_y = [p[1] for w in walls for p in (w.start, w.end)]
+    return ((min(all_x) + max(all_x)) / 2, (min(all_y) + max(all_y)) / 2)
+
+
+def detect_window_brackets(binary_image: np.ndarray, walls: List[WallCandidate]) -> List[WindowBracketCandidate]:
+    """
+    For each exterior wall, searches a thin band just outside it for small,
+    isolated bracket-shaped marks -- see module comment above. Only exterior
+    walls are searched: this symbol convention marks windows specifically,
+    and windows only occur on exterior walls in this pipeline's model
+    (matching the existing gap-based heuristic's own assumption).
+    """
+    if not walls:
+        return []
+
+    height, width = binary_image.shape[:2]
+    cx, cy = _building_center(walls)
+    candidates: List[WindowBracketCandidate] = []
+
+    for wall in walls:
+        if wall.wall_type != "exterior":
+            continue
+
+        wall_length = _segment_length(*wall.start, *wall.end)
+        if wall_length <= 0:
+            continue
+
+        if wall.orientation == "vertical":
+            wx = (wall.start[0] + wall.end[0]) / 2
+            y_min = int(max(0, min(wall.start[1], wall.end[1])))
+            y_max = int(min(height, max(wall.start[1], wall.end[1])))
+            outward_left = wx < cx  # wall is on the left side of the building -> outward is smaller x
+            if outward_left:
+                x0 = int(max(0, wx - WINDOW_BRACKET_SEARCH_MARGIN_PX - WINDOW_BRACKET_SEARCH_DEPTH_PX))
+                x1 = int(max(0, wx - WINDOW_BRACKET_SEARCH_MARGIN_PX))
+            else:
+                x0 = int(min(width, wx + WINDOW_BRACKET_SEARCH_MARGIN_PX))
+                x1 = int(min(width, wx + WINDOW_BRACKET_SEARCH_MARGIN_PX + WINDOW_BRACKET_SEARCH_DEPTH_PX))
+            if x1 <= x0 or y_max <= y_min:
+                continue
+            band = binary_image[y_min:y_max, x0:x1]
+        else:
+            wy = (wall.start[1] + wall.end[1]) / 2
+            x_min = int(max(0, min(wall.start[0], wall.end[0])))
+            x_max = int(min(width, max(wall.start[0], wall.end[0])))
+            outward_up = wy < cy
+            if outward_up:
+                y0 = int(max(0, wy - WINDOW_BRACKET_SEARCH_MARGIN_PX - WINDOW_BRACKET_SEARCH_DEPTH_PX))
+                y1 = int(max(0, wy - WINDOW_BRACKET_SEARCH_MARGIN_PX))
+            else:
+                y0 = int(min(height, wy + WINDOW_BRACKET_SEARCH_MARGIN_PX))
+                y1 = int(min(height, wy + WINDOW_BRACKET_SEARCH_MARGIN_PX + WINDOW_BRACKET_SEARCH_DEPTH_PX))
+            if y1 <= y0 or x_max <= x_min:
+                continue
+            band = binary_image[y0:y1, x_min:x_max]
+
+        if band.size == 0:
+            continue
+
+        contours, _ = cv2.findContours(band, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        for contour in contours:
+            bx, by, bw, bh = cv2.boundingRect(contour)
+            # Band axes differ by orientation: for a vertical wall the band
+            # was cropped as [y, x] so bw = depth (perpendicular to wall),
+            # bh = along-wall; for a horizontal wall it's the reverse.
+            depth_px, along_px = (bw, bh) if wall.orientation == "vertical" else (bh, bw)
+            if not (WINDOW_BRACKET_MIN_DEPTH_PX <= depth_px <= WINDOW_BRACKET_MAX_DEPTH_PX):
+                continue
+            if not (WINDOW_BRACKET_MIN_ALONG_PX <= along_px <= WINDOW_BRACKET_MAX_ALONG_PX):
+                continue
+
+            if wall.orientation == "vertical":
+                mark_pos_along = (y_min + by + bh / 2)
+                along_start, along_end = wall.start[1], wall.end[1]
+            else:
+                mark_pos_along = (x_min + bx + bw / 2)
+                along_start, along_end = wall.start[0], wall.end[0]
+
+            position = (mark_pos_along - along_start) / (along_end - along_start) if along_end != along_start else 0.5
+            position = min(1.0, max(0.0, position))
+
+            candidates.append(WindowBracketCandidate(wall_id=wall.id, position=position, size_px=max(bw, bh)))
+
+    return candidates
+
+
+def _deduplicate_window_brackets(
+    candidates: List[WindowBracketCandidate], min_position_gap: float = 0.03,
+) -> List[WindowBracketCandidate]:
+    """Multiple contour fragments of the same physical bracket mark collapse to one, per wall."""
+    by_wall: dict = {}
+    for c in candidates:
+        by_wall.setdefault(c.wall_id, []).append(c)
+
+    deduped: List[WindowBracketCandidate] = []
+    for wall_id, group in by_wall.items():
+        group_sorted = sorted(group, key=lambda c: c.position)
+        cluster = [group_sorted[0]]
+        for c in group_sorted[1:]:
+            if c.position - cluster[-1].position <= min_position_gap:
+                cluster.append(c)
+            else:
+                deduped.append(max(cluster, key=lambda c: c.size_px))
+                cluster = [c]
+        deduped.append(max(cluster, key=lambda c: c.size_px))
+    return deduped
+
+
+def _reclassify_doors_near_window_brackets(
+    opening_detections: List[OpeningDetection],
+    bracket_candidates: List["WindowBracketCandidate"],
+    position_tolerance: float = 0.08,
+) -> None:
+    """
+    Mutates opening_detections in place: any door whose position on a wall
+    is close to a confirmed window bracket on that SAME wall gets
+    reclassified as a window. See run_detection_pipeline's call site for the
+    full rationale (a real false positive found during testing, and why a
+    leaf-geometry-only fix wasn't safe).
+    """
+    brackets_by_wall: dict = {}
+    for b in bracket_candidates:
+        brackets_by_wall.setdefault(b.wall_id, []).append(b.position)
+
+    for detection in opening_detections:
+        if detection.kind != "door":
+            continue
+        bracket_positions = brackets_by_wall.get(detection.wall_id)
+        if not bracket_positions:
+            continue
+        if any(abs(detection.position - bp) <= position_tolerance for bp in bracket_positions):
+            detection.kind = "window"
+            detection.swing_detected = False
 
 
 # --- Stair detection (Tier 2 heuristic) ----------------------------------------
@@ -620,18 +989,45 @@ def run_detection_pipeline(image_path, project_id: str) -> dict:
     preprocessed = preprocessing.preprocess(image_path)
     working_image = preprocessed.working_image
 
-    walls, opening_candidates, thin_line_candidates = detect_walls(working_image)
+    walls, opening_candidates, thin_line_candidates, reclassified_stairs = detect_walls(working_image)
     rooms = detect_rooms(walls, working_image.shape)
     postprocessing.associate_room_boundary_walls(rooms, walls)
 
     wall_mask = isolate_wall_mask(working_image)
-    stairs = detect_stairs(working_image, wall_mask)
+    stairs = detect_stairs(working_image, wall_mask) + reclassified_stairs
 
     # Door/window classification needs a finer-grained segment search
     # (including short leaf-line fragments) than wall detection uses --
     # see detect_fine_segments_for_leaf_search's docstring.
     all_segments = detect_fine_segments_for_leaf_search(working_image)
     opening_detections = detect_openings(walls, opening_candidates, all_segments)
+
+    # Bracket-symbol windows are a separate detection strategy from the
+    # gap-based one above -- see detect_window_brackets's module comment.
+    bracket_candidates = _deduplicate_window_brackets(detect_window_brackets(working_image, walls))
+
+    # Cross-check: a real false positive was found during testing where a
+    # window's own bracket-mark corner lines were mistaken for a door swing
+    # leaf by the gap-based heuristic above, misclassifying that window as a
+    # door. Rather than trying to make leaf-line geometry heuristics tell
+    # real swing arcs apart from bracket-corner artifacts (tested and found
+    # NOT to cleanly generalize -- some genuine doors have fewer/shorter
+    # nearby fragments than this one false positive did), this uses a more
+    # specific, already-trusted signal instead: if a gap-based "door" sits
+    # very close to a confirmed window bracket on the SAME wall, the bracket
+    # evidence wins and that detection is reclassified as a window. Scope is
+    # naturally narrow -- bracket_candidates only ever exist on exterior
+    # walls, so interior door detections are never affected by this at all.
+    _reclassify_doors_near_window_brackets(opening_detections, bracket_candidates)
+
+    # Convert bracket candidates to OpeningDetection so both sources flow
+    # through the same downstream confidence-scoring and assembly code.
+    for bracket in bracket_candidates:
+        opening_detections.append(OpeningDetection(
+            id=_new_id("window"), kind="window", wall_id=bracket.wall_id,
+            position=bracket.position, width_px=bracket.size_px, swing_detected=False,
+        ))
+
     opening_detections = postprocessing.suppress_duplicate_openings(opening_detections)
 
     text_blocks = ocr_service.extract_text_blocks(preprocessed.grayscale_image)
@@ -642,6 +1038,7 @@ def run_detection_pipeline(image_path, project_id: str) -> dict:
     room_names_by_id = {rd["id"]: rd for rd in room_dicts}
 
     dimension_results = ocr_service.associate_dimensions(classified_texts, thin_line_candidates)
+    dimension_results += ocr_service.associate_room_size_dimensions(room_dicts, classified_texts)
 
     # --- Unit calibration ---
     matched_dimensions = [

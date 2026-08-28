@@ -74,7 +74,7 @@ def test_preprocess_rejects_missing_file():
 
 
 def test_detect_walls_finds_expected_count_on_cottage(cottage_preprocessed):
-    walls, openings, thin_lines = detector.detect_walls(cottage_preprocessed.working_image)
+    walls, openings, thin_lines, reclassified_stairs = detector.detect_walls(cottage_preprocessed.working_image)
     # 4 exterior perimeter walls + 1 interior dividing wall
     assert len(walls) == 5
     assert sum(1 for w in walls if w.wall_type == "exterior") == 4
@@ -82,14 +82,14 @@ def test_detect_walls_finds_expected_count_on_cottage(cottage_preprocessed):
 
 
 def test_detect_walls_finds_expected_count_on_studio(studio_preprocessed):
-    walls, openings, thin_lines = detector.detect_walls(studio_preprocessed.working_image)
+    walls, openings, thin_lines, reclassified_stairs = detector.detect_walls(studio_preprocessed.working_image)
     assert len(walls) == 4
     assert all(w.wall_type == "exterior" for w in walls)
 
 
 def test_thin_dimension_line_excluded_from_walls(cottage_preprocessed):
     """The 1px dimension line under the building must not be reported as a wall."""
-    walls, openings, thin_lines = detector.detect_walls(cottage_preprocessed.working_image)
+    walls, openings, thin_lines, reclassified_stairs = detector.detect_walls(cottage_preprocessed.working_image)
     for wall in walls:
         assert wall.thickness_px >= detector.MIN_WALL_THICKNESS_PX
     # ...but it should still be captured as dimension-line candidate geometry.
@@ -104,7 +104,7 @@ def test_interior_wall_classified_correctly_despite_spanning_most_of_the_height(
     wall (it spans nearly the full building height, like real exterior walls
     do) as exterior.
     """
-    walls, openings, thin_lines = detector.detect_walls(cottage_preprocessed.working_image)
+    walls, openings, thin_lines, reclassified_stairs = detector.detect_walls(cottage_preprocessed.working_image)
     interior_walls = [w for w in walls if w.wall_type == "interior"]
     assert len(interior_walls) == 1
     assert interior_walls[0].orientation == "vertical"
@@ -129,13 +129,13 @@ def test_nearby_offsets_straddling_bucket_boundary_still_merge():
 
 
 def test_detect_rooms_finds_two_rooms_on_cottage(cottage_preprocessed):
-    walls, openings, thin_lines = detector.detect_walls(cottage_preprocessed.working_image)
+    walls, openings, thin_lines, reclassified_stairs = detector.detect_walls(cottage_preprocessed.working_image)
     rooms = detector.detect_rooms(walls, cottage_preprocessed.working_image.shape)
     assert len(rooms) == 2
 
 
 def test_detect_rooms_finds_one_room_on_studio(studio_preprocessed):
-    walls, openings, thin_lines = detector.detect_walls(studio_preprocessed.working_image)
+    walls, openings, thin_lines, reclassified_stairs = detector.detect_walls(studio_preprocessed.working_image)
     rooms = detector.detect_rooms(walls, studio_preprocessed.working_image.shape)
     assert len(rooms) == 1
 
@@ -146,13 +146,13 @@ def test_room_hierarchy_artifact_not_counted_as_extra_room(cottage_preprocessed)
     building's wall silhouette as a child of the background contour. An
     earlier version counted this as a spurious third room.
     """
-    walls, openings, thin_lines = detector.detect_walls(cottage_preprocessed.working_image)
+    walls, openings, thin_lines, reclassified_stairs = detector.detect_walls(cottage_preprocessed.working_image)
     rooms = detector.detect_rooms(walls, cottage_preprocessed.working_image.shape)
     assert len(rooms) == 2, "A hierarchy artifact should not be counted as a room"
 
 
 def test_room_polygons_have_at_least_three_points(cottage_preprocessed):
-    walls, openings, thin_lines = detector.detect_walls(cottage_preprocessed.working_image)
+    walls, openings, thin_lines, reclassified_stairs = detector.detect_walls(cottage_preprocessed.working_image)
     rooms = detector.detect_rooms(walls, cottage_preprocessed.working_image.shape)
     for room in rooms:
         assert len(room.polygon_px) >= 3
@@ -163,7 +163,7 @@ def test_room_polygons_have_at_least_three_points(cottage_preprocessed):
 
 def test_exterior_door_detected_with_swing(cottage_preprocessed):
     img = cottage_preprocessed.working_image
-    walls, opening_candidates, thin_lines = detector.detect_walls(img)
+    walls, opening_candidates, thin_lines, reclassified_stairs = detector.detect_walls(img)
     all_segments = detector.detect_fine_segments_for_leaf_search(img)
     openings = detector.detect_openings(walls, opening_candidates, all_segments)
 
@@ -173,7 +173,7 @@ def test_exterior_door_detected_with_swing(cottage_preprocessed):
 
 def test_cottage_has_two_doors_and_one_window(cottage_preprocessed):
     img = cottage_preprocessed.working_image
-    walls, opening_candidates, thin_lines = detector.detect_walls(img)
+    walls, opening_candidates, thin_lines, reclassified_stairs = detector.detect_walls(img)
     all_segments = detector.detect_fine_segments_for_leaf_search(img)
     openings = detector.detect_openings(walls, opening_candidates, all_segments)
     openings = postprocessing.suppress_duplicate_openings(openings)
@@ -186,11 +186,136 @@ def test_cottage_has_two_doors_and_one_window(cottage_preprocessed):
 
 def test_studio_door_detected(studio_preprocessed):
     img = studio_preprocessed.working_image
-    walls, opening_candidates, thin_lines = detector.detect_walls(img)
+    walls, opening_candidates, thin_lines, reclassified_stairs = detector.detect_walls(img)
     all_segments = detector.detect_fine_segments_for_leaf_search(img)
     openings = detector.detect_openings(walls, opening_candidates, all_segments)
     assert len(openings) == 1
     assert openings[0].kind == "door"
+
+
+# --- Window bracket-symbol detection (Prompt 8 follow-up) ------------------
+#
+# Found via real-world testing: most windows in a real floor plan are drawn
+# as a small bracket mark positioned OUTSIDE the wall line, not as a gap IN
+# the wall line -- a structurally different signal from what
+# detect_openings() looks for. Confirmed by direct visual inspection (zoomed
+# crops) of the real test image before writing any detection code.
+
+
+def test_bracket_detection_finds_no_false_positives_on_clean_synthetic_samples(cottage_preprocessed, studio_preprocessed):
+    """
+    The synthetic fixtures don't use the bracket-window convention at all --
+    this must not invent windows that aren't there.
+    """
+    for preprocessed in (cottage_preprocessed, studio_preprocessed):
+        img = preprocessed.working_image
+        walls, _, _, _ = detector.detect_walls(img)
+        brackets = detector.detect_window_brackets(img, walls)
+        deduped = detector._deduplicate_window_brackets(brackets)
+        assert len(deduped) == 0
+
+
+def test_bracket_detection_only_searches_exterior_walls():
+    """Interior walls should never be searched for window brackets -- windows only occur on exterior walls in this model."""
+    import numpy as np
+    blank = np.zeros((200, 200), dtype=np.uint8)
+    interior_wall = detector.WallCandidate(
+        id="w1", start=(50.0, 50.0), end=(50.0, 150.0), orientation="vertical", wall_type="interior",
+    )
+    result = detector.detect_window_brackets(blank, [interior_wall])
+    assert result == []
+
+
+def test_deduplicate_window_brackets_collapses_nearby_fragments():
+    """Multiple contour fragments of the same physical bracket (very close positions) should collapse to one."""
+    candidates = [
+        detector.WindowBracketCandidate(wall_id="w1", position=0.100, size_px=15.0),
+        detector.WindowBracketCandidate(wall_id="w1", position=0.105, size_px=20.0),  # same mark, another fragment
+        detector.WindowBracketCandidate(wall_id="w1", position=0.500, size_px=18.0),  # a genuinely separate mark
+    ]
+    deduped = detector._deduplicate_window_brackets(candidates)
+    assert len(deduped) == 2
+    assert max(c.size_px for c in deduped) == 20.0
+
+
+def test_real_floorplan_window_count_improves_with_bracket_detection():
+    """
+    End-to-end confirmation on the real image: window count roughly doubles
+    (4 -> 10 measured) once bracket-symbol detection is added, since most of
+    that image's windows use this convention rather than a wall gap.
+    """
+    fixture = REPO_ROOT / "backend" / "tests" / "fixtures" / "fl-1.jpg"
+    if not fixture.exists():
+        pytest.skip(f"Optional real-world regression fixture not found at {fixture}")
+    fp_dict = detector.run_detection_pipeline(str(fixture), "WINDOW-BRACKET-REGRESSION")
+    assert len(fp_dict["windows"]) >= 8  # was 4 before this fix; generous lower bound, not pinned exactly
+
+
+# --- Door/window bracket cross-check (Prompt 8 follow-up #2) ----------------
+#
+# Found via the same real-world testing session as the bracket-window fix
+# above: a window's own bracket-mark corner lines were being mistaken for a
+# door swing leaf by the gap-based heuristic, misclassifying that window as
+# a door. Tried a leaf-fragment-count heuristic first and confirmed (with
+# real measured data) it does NOT cleanly generalize -- some genuine doors
+# have fewer/shorter nearby leaf fragments than this one false positive did.
+# Fixed instead by cross-referencing against the already-trusted window
+# bracket detections.
+
+
+def test_door_near_window_bracket_reclassified():
+    bracket = detector.WindowBracketCandidate(wall_id="wall-1", position=0.42, size_px=20.0)
+    door = detector.OpeningDetection(
+        id="door-1", kind="door", wall_id="wall-1", position=0.425, width_px=15.0, swing_detected=True,
+    )
+    detector._reclassify_doors_near_window_brackets([door], [bracket])
+    assert door.kind == "window"
+    assert door.swing_detected is False
+
+
+def test_door_far_from_window_bracket_not_reclassified():
+    bracket = detector.WindowBracketCandidate(wall_id="wall-1", position=0.10, size_px=20.0)
+    door = detector.OpeningDetection(
+        id="door-1", kind="door", wall_id="wall-1", position=0.80, width_px=15.0, swing_detected=True,
+    )
+    detector._reclassify_doors_near_window_brackets([door], [bracket])
+    assert door.kind == "door"
+
+
+def test_door_on_different_wall_not_reclassified():
+    """A bracket on a different wall must never affect a door's classification, even at the same position value."""
+    bracket = detector.WindowBracketCandidate(wall_id="wall-OTHER", position=0.42, size_px=20.0)
+    door = detector.OpeningDetection(
+        id="door-1", kind="door", wall_id="wall-1", position=0.42, width_px=15.0, swing_detected=True,
+    )
+    detector._reclassify_doors_near_window_brackets([door], [bracket])
+    assert door.kind == "door"
+
+
+def test_windows_never_affected_by_reclassification():
+    """The function only ever touches kind=='door' entries -- an existing window must pass through unchanged."""
+    bracket = detector.WindowBracketCandidate(wall_id="wall-1", position=0.42, size_px=20.0)
+    window = detector.OpeningDetection(
+        id="window-1", kind="window", wall_id="wall-1", position=0.42, width_px=15.0, swing_detected=False,
+    )
+    detector._reclassify_doors_near_window_brackets([window], [bracket])
+    assert window.kind == "window"
+
+
+def test_real_floorplan_false_positive_door_corrected():
+    """
+    End-to-end confirmation on the real image: a window that was
+    misclassified as a door (found via visual inspection against the source
+    image) is now correctly reclassified, without losing it entirely --
+    total door+window count should reflect the corrected classification,
+    not a lost detection.
+    """
+    fixture = REPO_ROOT / "backend" / "tests" / "fixtures" / "fl-1.jpg"
+    if not fixture.exists():
+        pytest.skip(f"Optional real-world regression fixture not found at {fixture}")
+    fp_dict = detector.run_detection_pipeline(str(fixture), "DOOR-RECLASSIFY-REGRESSION")
+    assert len(fp_dict["doors"]) == 5  # was 6 (with 1 false positive) before this fix
+    assert len(fp_dict["windows"]) == 11  # was 10 before this fix -- gains the reclassified one, not a duplicate
 
 
 # --- Stair detection -----------------------------------------------------------
@@ -198,7 +323,7 @@ def test_studio_door_detected(studio_preprocessed):
 
 def test_stair_detected_on_cottage(cottage_preprocessed):
     img = cottage_preprocessed.working_image
-    walls, opening_candidates, thin_lines = detector.detect_walls(img)
+    walls, opening_candidates, thin_lines, reclassified_stairs = detector.detect_walls(img)
     wall_mask = detector.isolate_wall_mask(img)
     stairs = detector.detect_stairs(img, wall_mask)
     assert len(stairs) == 1
@@ -224,6 +349,127 @@ def test_ocr_text_does_not_produce_false_stair_detection(cottage_preprocessed):
         xs = [p[0] for p in stair.polygon_px]
         width = max(xs) - min(xs)
         assert width <= detector.STAIR_MAX_ALONG_EXTENT_PX
+
+
+# --- Dense-hatch stair reclassification (Prompt 8) ------------------------
+
+
+def test_dense_wall_cluster_reclassified_as_stair():
+    """
+    Real-world regression test: a dense staircase hatch pattern in a real
+    (non-synthetic) floor plan survived wall-isolation and got consolidated
+    into 6 irregularly-spaced short "walls" floating mid-room -- exactly
+    the shape detect_stairs()'s strict regularity check was never meant to
+    catch (that check is tuned for evenly-spaced synthetic tread lines).
+    Coordinates below are captured verbatim from that real case.
+    """
+    walls = [
+        detector.WallCandidate(id="w1", start=(474.5, 323.0), end=(474.5, 404.0), orientation="vertical", wall_type="interior"),
+        detector.WallCandidate(id="w2", start=(501.5, 321.0), end=(501.5, 409.0), orientation="vertical", wall_type="interior"),
+        detector.WallCandidate(id="w3", start=(516.0, 332.0), end=(516.0, 409.0), orientation="vertical", wall_type="interior"),
+        detector.WallCandidate(id="w4", start=(571.5, 323.0), end=(571.5, 402.0), orientation="vertical", wall_type="interior"),
+        detector.WallCandidate(id="w5", start=(600.0, 322.0), end=(600.0, 403.0), orientation="vertical", wall_type="interior"),
+        detector.WallCandidate(id="w6", start=(612.5, 323.0), end=(612.5, 403.0), orientation="vertical", wall_type="interior"),
+    ]
+    remaining, stairs = detector._reclassify_dense_wall_clusters_as_stairs(walls)
+    assert len(remaining) == 0
+    assert len(stairs) == 1
+
+
+def test_unrelated_wall_not_pulled_into_stair_cluster_by_chaining():
+    """
+    Regression test for a real bug found while building the fix above:
+    perpendicular-proximity-only clustering chained through an unrelated
+    wall elsewhere in the same house (similar x-coordinate, completely
+    different y-range) into the stair cluster, which then failed the
+    compactness bound and silently prevented ANY reclassification. Requiring
+    along-axis range overlap (not just perpendicular proximity) fixes this.
+    """
+    walls = [
+        detector.WallCandidate(id="unrelated", start=(380.89, 55.0), end=(380.89, 186.0), orientation="vertical", wall_type="interior"),
+        detector.WallCandidate(id="w1", start=(474.5, 323.0), end=(474.5, 404.0), orientation="vertical", wall_type="interior"),
+        detector.WallCandidate(id="w2", start=(501.5, 321.0), end=(501.5, 409.0), orientation="vertical", wall_type="interior"),
+        detector.WallCandidate(id="w3", start=(516.0, 332.0), end=(516.0, 409.0), orientation="vertical", wall_type="interior"),
+        detector.WallCandidate(id="w4", start=(571.5, 323.0), end=(571.5, 402.0), orientation="vertical", wall_type="interior"),
+        detector.WallCandidate(id="w5", start=(600.0, 322.0), end=(600.0, 403.0), orientation="vertical", wall_type="interior"),
+        detector.WallCandidate(id="w6", start=(612.5, 323.0), end=(612.5, 403.0), orientation="vertical", wall_type="interior"),
+    ]
+    remaining, stairs = detector._reclassify_dense_wall_clusters_as_stairs(walls)
+    assert len(stairs) == 1
+    assert [w.id for w in remaining] == ["unrelated"]
+
+
+def test_exterior_walls_never_reclassified_as_stairs():
+    """A dense cluster of EXTERIOR walls should never be reclassified -- only interior walls are eligible."""
+    walls = [
+        detector.WallCandidate(id=f"w{i}", start=(100.0 + i * 10, 50.0), end=(100.0 + i * 10, 120.0), orientation="vertical", wall_type="exterior")
+        for i in range(6)
+    ]
+    remaining, stairs = detector._reclassify_dense_wall_clusters_as_stairs(walls)
+    assert len(stairs) == 0
+    assert len(remaining) == 6
+
+
+def test_too_few_candidates_not_reclassified():
+    """Fewer than STAIR_RECLASSIFY_MIN_MEMBERS compact interior walls should be left alone."""
+    walls = [
+        detector.WallCandidate(id=f"w{i}", start=(100.0 + i * 10, 50.0), end=(100.0 + i * 10, 120.0), orientation="vertical", wall_type="interior")
+        for i in range(3)  # below STAIR_RECLASSIFY_MIN_MEMBERS (4)
+    ]
+    remaining, stairs = detector._reclassify_dense_wall_clusters_as_stairs(walls)
+    assert len(stairs) == 0
+    assert len(remaining) == 3
+
+
+def test_real_floorplan_stair_correctly_found_after_reclassification():
+    """End-to-end confirmation on the real image: stairs go from 0 (missed) to 1 (found) after this fix."""
+    fixture = REPO_ROOT / "backend" / "tests" / "fixtures" / "fl-1.jpg"
+    if not fixture.exists():
+        pytest.skip(f"Optional real-world regression fixture not found at {fixture}")
+    fp_dict = detector.run_detection_pipeline(str(fixture), "STAIR-REGRESSION")
+    assert len(fp_dict["stairs"]) >= 1
+
+
+# --- Wall endpoint snapping (Prompt 8) -------------------------------------
+
+
+def test_snap_extends_vertical_wall_to_meet_horizontal_wall():
+    """
+    Regression test: docs/DETECTION_PIPELINE.md Section 8 specified endpoint
+    snapping, but it had never actually been implemented -- found by
+    visually inspecting the wall mask used for room-contour extraction on a
+    real floor plan and seeing walls stop just short of the perpendicular
+    wall they should meet.
+    """
+    vertical = detector.WallCandidate(id="v1", start=(100.0, 50.0), end=(100.0, 195.0), orientation="vertical", wall_type="interior")
+    horizontal = detector.WallCandidate(id="h1", start=(50.0, 200.0), end=(150.0, 200.0), orientation="horizontal", wall_type="interior")
+    walls = [vertical, horizontal]
+
+    detector.snap_wall_endpoints_to_junctions(walls)
+
+    assert vertical.end == (100.0, 200.0)  # snapped from 195 to meet horizontal's y=200
+
+
+def test_snap_does_not_move_endpoints_beyond_tolerance():
+    """A gap larger than ENDPOINT_SNAP_TOLERANCE_PX should not be snapped -- avoids corrupting genuinely separate walls."""
+    vertical = detector.WallCandidate(id="v1", start=(100.0, 50.0), end=(100.0, 100.0), orientation="vertical", wall_type="interior")
+    horizontal = detector.WallCandidate(id="h1", start=(50.0, 200.0), end=(150.0, 200.0), orientation="horizontal", wall_type="interior")
+    walls = [vertical, horizontal]
+
+    detector.snap_wall_endpoints_to_junctions(walls)
+
+    assert vertical.end == (100.0, 100.0)  # unchanged -- gap of 100px exceeds tolerance
+
+
+def test_snap_only_moves_along_own_axis():
+    """A vertical wall's endpoint should only move in y, never in x, when snapping."""
+    vertical = detector.WallCandidate(id="v1", start=(100.0, 50.0), end=(100.0, 195.0), orientation="vertical", wall_type="interior")
+    horizontal = detector.WallCandidate(id="h1", start=(50.0, 200.0), end=(150.0, 200.0), orientation="horizontal", wall_type="interior")
+    walls = [vertical, horizontal]
+
+    detector.snap_wall_endpoints_to_junctions(walls)
+
+    assert vertical.end[0] == 100.0  # x unchanged
 
 
 # --- OCR ------------------------------------------------------------------
@@ -278,9 +524,79 @@ def test_dimension_pattern_parses_common_formats():
     assert ocr_service._parse_dimension_value("Bedroom") is None
 
 
+def test_room_size_pair_parses_real_world_ocr_strings():
+    """
+    Regression test using strings captured verbatim from OCR run against a
+    real, user-uploaded floor plan (not a synthetic fixture) -- every
+    dimension label in that image used a "W X H" room-size format (e.g.
+    "18' X 8'"), which the original single-value DIMENSION_PATTERN could
+    not parse at all (0 dimensions were extracted before this fix existed).
+    Includes Tesseract's confirmed common misread of ' as ° in this context.
+    """
+    assert ocr_service._parse_room_size_pair("18\u00b0 X 8") == (18.0, 8.0)
+    assert ocr_service._parse_room_size_pair("12\u00b0X 11\u00b0") == (12.0, 11.0)
+    assert ocr_service._parse_room_size_pair("12' X 6") == (12.0, 6.0)
+    assert ocr_service._parse_room_size_pair("5X 6") == (5.0, 6.0)
+    assert ocr_service._parse_room_size_pair("14'X 12!") == (14.0, 12.0)
+    # Feet-inches on both sides: 52'6" -> 52.5, 13' -> 13.0
+    assert ocr_service._parse_room_size_pair("52'6\" X 13'") == pytest.approx((52.5, 13.0))
+
+
+def test_room_size_pair_does_not_guess_at_genuinely_garbled_text():
+    """
+    "14X58" is real garbled OCR output (almost certainly a mangled
+    "14' X 5'"), but it's genuinely ambiguous -- this intentionally does NOT
+    try to guess the "probably intended" reading. It parses at face value
+    (14, 58) since that IS a structurally valid W X H match; the point of
+    this test is only to confirm no exception/silent-failure occurs, and
+    that we're not doing anything sneakier than face-value parsing.
+    """
+    result = ocr_service._parse_room_size_pair("14X58")
+    assert result == (14.0, 58.0)
+
+
+def test_room_size_pair_returns_none_for_non_matching_text():
+    assert ocr_service._parse_room_size_pair("Bathroom") is None
+    assert ocr_service._parse_room_size_pair("Passage") is None
+    assert ocr_service._parse_room_size_pair("") is None
+
+
+def test_classify_text_blocks_expands_room_size_pair_into_two_dimensions():
+    block = ocr_service.TextBlock(
+        text="18' X 8'", center=(100, 100), bbox_min=(80, 90), bbox_max=(120, 110), confidence=0.9,
+    )
+    classified = ocr_service.classify_text_blocks([block])
+    assert len(classified) == 2
+    assert all(c.kind == "dimension" for c in classified)
+    assert all(c.is_pair_component for c in classified)
+    assert {c.dimension_value for c in classified} == {18.0, 8.0}
+
+
+def test_expanded_room_keywords_cover_real_world_terms_previously_missed():
+    """
+    Regression test: 'guest room', 'Passage', 'Drawing room', and 'Utility'
+    were all correctly OCR'd from a real floor plan but classified as
+    kind='other' before ROOM_TYPE_KEYWORDS was expanded, since none of
+    those exact terms existed in the keyword list yet.
+    """
+    cases = {
+        "guest room": "guest_room",
+        "Passage": "hallway",
+        "Drawing room": "living_room",
+        "Utility": "laundry",
+    }
+    for text, expected_room_type in cases.items():
+        block = ocr_service.TextBlock(
+            text=text, center=(0, 0), bbox_min=(0, 0), bbox_max=(10, 10), confidence=0.9,
+        )
+        result = ocr_service.classify_text_block(block)
+        assert result.kind == "room_label", f"{text!r} should classify as room_label"
+        assert result.room_type == expected_room_type
+
+
 def test_room_label_association_by_point_in_polygon(cottage_preprocessed):
     img = cottage_preprocessed.working_image
-    walls, opening_candidates, thin_lines = detector.detect_walls(img)
+    walls, opening_candidates, thin_lines, reclassified_stairs = detector.detect_walls(img)
     rooms = detector.detect_rooms(walls, img.shape)
     room_dicts = [{"id": r.id, "polygon_px": r.polygon_px} for r in rooms]
 
@@ -295,7 +611,7 @@ def test_room_label_association_by_point_in_polygon(cottage_preprocessed):
 
 def test_dimension_matched_to_thin_line_geometry(cottage_preprocessed):
     img = cottage_preprocessed.working_image
-    walls, opening_candidates, thin_lines = detector.detect_walls(img)
+    walls, opening_candidates, thin_lines, reclassified_stairs = detector.detect_walls(img)
     blocks = ocr_service.extract_text_blocks(cottage_preprocessed.grayscale_image)
     classified = ocr_service.classify_text_blocks(blocks)
     dims = ocr_service.associate_dimensions(classified, thin_lines)
@@ -303,6 +619,67 @@ def test_dimension_matched_to_thin_line_geometry(cottage_preprocessed):
     assert len(dims) == 1
     assert dims[0]["value"] == 24.0
     assert dims[0]["matched_to_geometry"] is True
+
+
+def test_room_size_dimensions_matched_to_containing_room_bbox():
+    """
+    A "W X H" room-size label has no adjacent drawn measurement line (unlike
+    a perimeter dimension callout) -- it describes the room it sits inside.
+    This confirms width/height values get matched against that room's own
+    pixel bounding box rather than falling back to a low-confidence,
+    unmatched guess.
+    """
+    room = {"id": "room-1", "polygon_px": [(0, 0), (100, 0), (100, 50), (0, 50)]}
+    block = ocr_service.TextBlock(
+        text="10' X 5'", center=(50, 25), bbox_min=(30, 15), bbox_max=(70, 35), confidence=0.9,
+    )
+    classified = ocr_service.classify_text_blocks([block])
+
+    results = ocr_service.associate_room_size_dimensions([room], classified)
+
+    assert len(results) == 2
+    assert all(r["matched_to_geometry"] for r in results)
+    values = {r["value"] for r in results}
+    assert values == {10.0, 5.0}
+    # Confidence should be the OCR confidence directly (no 0.6x unmatched discount).
+    assert all(r["confidence"] == pytest.approx(0.9) for r in results)
+
+
+def test_room_size_dimension_falls_back_when_no_room_matches():
+    """A pair whose text center doesn't land inside any detected room should still produce results, just unmatched."""
+    block = ocr_service.TextBlock(
+        text="10' X 5'", center=(500, 500), bbox_min=(480, 490), bbox_max=(520, 510), confidence=0.9,
+    )
+    classified = ocr_service.classify_text_blocks([block])
+
+    results = ocr_service.associate_room_size_dimensions([], classified)
+
+    assert len(results) == 2
+    assert all(r["matched_to_geometry"] is False for r in results)
+
+
+def test_real_floorplan_calibration_uses_ocr_match_not_fallback():
+    """
+    End-to-end regression test against the actual real-world image that
+    surfaced this whole class of bug: before the room-size-pair fix,
+    calibration always fell back to the default-assumption guess for this
+    image (0 dimensions were ever matched to geometry). It should now use
+    real OCR-matched measurements.
+
+    This is optional/local-only: fl-1.jpg is the user's own uploaded test
+    image, not a committed repository fixture, so this skips gracefully if
+    it isn't present. To run it locally, copy the image to
+    backend/tests/fixtures/fl-1.jpg (create that folder if needed).
+    """
+    real_image_path = Path(__file__).resolve().parent / "fixtures" / "fl-1.jpg"
+    if not real_image_path.exists():
+        pytest.skip(f"Optional real-world regression fixture not found at {real_image_path}")
+
+    fp_dict = detector.run_detection_pipeline(str(real_image_path), "REAL-IMAGE-REGRESSION")
+    result = validate_floorplan(fp_dict)
+    assert result.is_valid, result.errors
+    assert len(fp_dict["dimensions"]) > 0
+    assert fp_dict["metadata"]["extra"]["calibration_source"] == "ocr_dimension_match"
 
 
 # --- Postprocessing / calibration ----------------------------------------------
@@ -330,7 +707,7 @@ def test_calibration_last_resort_when_nothing_available():
 
 
 def test_wall_confidence_within_valid_range(cottage_preprocessed):
-    walls, openings, thin_lines = detector.detect_walls(cottage_preprocessed.working_image)
+    walls, openings, thin_lines, reclassified_stairs = detector.detect_walls(cottage_preprocessed.working_image)
     for wall in walls:
         confidence = postprocessing.score_wall_confidence(wall)
         assert 0.0 <= confidence <= 1.0

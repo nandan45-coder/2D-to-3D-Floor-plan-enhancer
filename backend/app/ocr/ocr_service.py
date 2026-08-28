@@ -24,15 +24,18 @@ Point = Tuple[float, float]
 # easy to extend without touching pipeline logic.
 ROOM_TYPE_KEYWORDS = {
     "bedroom": "bedroom", "bed room": "bedroom", "master bedroom": "bedroom",
+    "guest room": "guest_room", "guest bedroom": "guest_room",
     "bathroom": "bathroom", "bath room": "bathroom", "bath": "bathroom", "wc": "bathroom",
+    "common bathroom": "bathroom", "common bath": "bathroom", "attached bathroom": "bathroom",
     "kitchen": "kitchen",
     "living room": "living_room", "lounge": "living_room", "family room": "living_room",
+    "drawing room": "living_room",  # common in South Asian English floor plan conventions
     "dining room": "dining_room", "dining": "dining_room",
     "closet": "closet", "wardrobe": "closet",
     "garage": "garage",
-    "hallway": "hallway", "hall": "hallway", "corridor": "hallway",
+    "hallway": "hallway", "hall": "hallway", "corridor": "hallway", "passage": "hallway",
     "office": "office", "study": "office",
-    "laundry": "laundry",
+    "laundry": "laundry", "utility": "laundry",
     "studio": "studio",
     "entry": "entry", "foyer": "entry",
 }
@@ -47,6 +50,38 @@ DIMENSION_PATTERN = re.compile(
     (ft|feet|m|meters?|cm|in|inches|'|")?
     \s*$""",
     re.IGNORECASE | re.VERBOSE,
+)
+
+# --- Room-size "W X H" pair pattern ---------------------------------------
+#
+# Added after testing against a real floor plan (not a synthetic fixture):
+# every dimension label in that real-world image used a "12' X 6'"
+# width-by-height format (e.g. room sizes like "18' X 8'"), not the single
+# standalone-length format DIMENSION_PATTERN above was designed for (which
+# only ever matched a synthetic fixture's "24 ft" building-width label).
+# Zero dimensions were extracted from that real image before this was added
+# -- a real, confirmed gap, not a hypothetical one.
+#
+# Tesseract also very consistently misreads the foot/prime mark (') as a
+# degree symbol (°) when it sits directly after a digit in this context
+# (confirmed against real OCR output: "18° X 8", "12°X 11°"). That specific
+# substitution is common and low-risk to normalize for; arbitrary garbled
+# characters elsewhere (e.g. "14X58", likely a mangled "14' X 5'") are
+# intentionally NOT guessed at -- fabricating a "probably meant" digit would
+# be worse than leaving a genuinely unreadable label undetected.
+_NUM = r"\d+(?:\.\d+)?"
+_FOOT_TICK = r"['\u00b0\u2019\u2032]"  # ' or ° (common OCR misread) or curly-quote or prime
+_INCH_TICK = r'["\u201d\u2033]'  # " or curly double-quote or double-prime
+
+# A single length value, optionally with a feet-inches suffix like 6'3" or
+# 6°3" (already covers the "'-6\"" test case above, plus the ° misread).
+_SINGLE_VALUE_FRAGMENT = (
+    rf"({_NUM})\s*(?:{_FOOT_TICK}\s*({_NUM})\s*{_INCH_TICK}?)?\s*"
+    rf"(?:ft|feet|m|meters?|cm|in|inches|{_FOOT_TICK}|{_INCH_TICK})?"
+)
+
+ROOM_SIZE_PAIR_PATTERN = re.compile(
+    rf"^\s*{_SINGLE_VALUE_FRAGMENT}\s*[xX]\s*{_SINGLE_VALUE_FRAGMENT}\s*[^\w]{{0,3}}$",
 )
 
 
@@ -65,6 +100,7 @@ class ClassifiedText:
     kind: Literal["dimension", "room_label", "other"]
     dimension_value: Optional[float] = None  # populated if kind == "dimension"
     room_type: Optional[str] = None  # populated if kind == "room_label" and matched a keyword
+    is_pair_component: bool = False  # True if this came from splitting a "W X H" room-size label
 
 
 _easyocr_reader = None
@@ -257,11 +293,57 @@ def _parse_dimension_value(text: str) -> Optional[float]:
     return value
 
 
+def _parse_room_size_pair(text: str) -> Optional[Tuple[float, float]]:
+    """
+    Parses a "W X H" room-size label (e.g. "18' X 8'", "12°X 11°" -- see
+    ROOM_SIZE_PAIR_PATTERN's comment for why the ° tolerance exists) into
+    (width, height). Returns None if the text doesn't match this shape at
+    all -- including genuinely garbled OCR text that happens to contain
+    digits and an 'x' but isn't a clean pair (e.g. "14X58"), which is left
+    unparsed intentionally rather than guessed at.
+    """
+    match = ROOM_SIZE_PAIR_PATTERN.match(text)
+    if not match:
+        return None
+
+    w_whole, w_inches, h_whole, h_inches = match.group(1), match.group(2), match.group(3), match.group(4)
+
+    def _to_value(whole: str, inches: Optional[str]) -> Optional[float]:
+        try:
+            value = float(whole)
+        except ValueError:
+            return None
+        if inches:
+            try:
+                value += float(inches) / 12.0
+            except ValueError:
+                pass
+        return value
+
+    width = _to_value(w_whole, w_inches)
+    height = _to_value(h_whole, h_inches)
+    if width is None or height is None:
+        return None
+    return (width, height)
+
+
 def classify_text_block(block: TextBlock) -> ClassifiedText:
-    """Section 7 step 2: dimension pattern match, else room-keyword match, else 'other'."""
+    """
+    Section 7 step 2: dimension pattern match, else room-keyword match, else
+    'other'. Returns a single ClassifiedText -- for text that's actually a
+    "W X H" room-size pair (two measurements in one label), use
+    classify_text_blocks (plural), which expands a pair into two separate
+    dimension entries. This function only reports the first of the two in
+    that case, since its signature can only return one result; prefer the
+    plural form when pair-awareness matters.
+    """
     text = block.text.strip()
     if not text:
         return ClassifiedText(block=block, kind="other")
+
+    pair = _parse_room_size_pair(text)
+    if pair is not None:
+        return ClassifiedText(block=block, kind="dimension", dimension_value=pair[0])
 
     dimension_value = _parse_dimension_value(text)
     if dimension_value is not None:
@@ -276,7 +358,31 @@ def classify_text_block(block: TextBlock) -> ClassifiedText:
 
 
 def classify_text_blocks(blocks: List[TextBlock]) -> List[ClassifiedText]:
-    return [classify_text_block(b) for b in blocks]
+    """
+    Like classify_text_block, but pair-aware: a "W X H" room-size label
+    (e.g. "18' X 8'") produces TWO dimension entries in the returned list --
+    one for the width, one for the height -- since each represents a
+    genuinely separate real-world measurement. Both share the same source
+    label text; downstream association (associate_dimensions) matches each
+    independently to nearby geometry.
+    """
+    results: List[ClassifiedText] = []
+    for block in blocks:
+        text = block.text.strip()
+        if not text:
+            results.append(ClassifiedText(block=block, kind="other"))
+            continue
+
+        pair = _parse_room_size_pair(text)
+        if pair is not None:
+            width, height = pair
+            results.append(ClassifiedText(block=block, kind="dimension", dimension_value=width, is_pair_component=True))
+            results.append(ClassifiedText(block=block, kind="dimension", dimension_value=height, is_pair_component=True))
+            continue
+
+        results.append(classify_text_block(block))
+
+    return results
 
 
 def associate_room_labels(rooms: List, classified_texts: List[ClassifiedText]) -> None:
@@ -321,11 +427,21 @@ def associate_dimensions(
     as the annotation's start/end. Falls back to a short span centered on
     the text's own bounding box (lower confidence) if none is found.
 
+    Pair-component entries (from a "W X H" room-size label -- see
+    is_pair_component) are skipped here and handled by
+    associate_room_size_dimensions instead: a room-size label has no nearby
+    drawn measurement line to match against (it's describing the room it
+    sits inside, not a perimeter callout), so searching for one here would
+    only ever hit the low-confidence text-bbox fallback -- which is exactly
+    what was observed when this was tested against a real floor plan before
+    this split existed (every room-size dimension came back at ~0.28
+    confidence, unmatched).
+
     Returns a list of plain dicts ready to become DimensionAnnotation
     elements: {value, start, end, confidence, matched_to_geometry}.
     """
     results: List[dict] = []
-    dimension_texts = [ct for ct in classified_texts if ct.kind == "dimension"]
+    dimension_texts = [ct for ct in classified_texts if ct.kind == "dimension" and not ct.is_pair_component]
 
     for dim in dimension_texts:
         center = dim.block.center
@@ -361,3 +477,100 @@ def associate_dimensions(
         })
 
     return results
+
+
+def associate_room_size_dimensions(rooms: List, classified_texts: List[ClassifiedText]) -> List[dict]:
+    """
+    Handles "W X H" room-size labels (e.g. "18' X 8'" written inside a
+    room) -- a different geometric situation from a perimeter dimension
+    callout: there's no separate drawn measurement line to match against,
+    but there IS a detected room polygon the text sits inside, and that
+    room's own pixel bounding box is a legitimate, direct calibration
+    reference (width value <-> room's pixel width, height value <-> room's
+    pixel height).
+
+    Falls back to the same short-text-bbox-span approach as
+    associate_dimensions when a pair's text doesn't land inside any
+    detected room polygon (e.g. the room-detection step missed that
+    region), so this never produces fewer results than treating them as
+    plain unmatched dimensions would.
+    """
+    from shapely.geometry import Point as ShapelyPoint
+    from shapely.geometry import Polygon as ShapelyPolygon
+
+    # Pair components share the same source TextBlock (by identity) -- two
+    # per block, emitted width-then-height by classify_text_blocks.
+    pair_components = [ct for ct in classified_texts if ct.kind == "dimension" and ct.is_pair_component]
+    blocks_seen: dict = {}
+    for ct in pair_components:
+        blocks_seen.setdefault(id(ct.block), []).append(ct)
+
+    results: List[dict] = []
+
+    for entries in blocks_seen.values():
+        if len(entries) != 2:
+            # Shouldn't happen given how classify_text_blocks emits these,
+            # but degrade gracefully rather than assume the shape.
+            for ct in entries:
+                results.append(_fallback_dimension_dict(ct))
+            continue
+
+        width_entry, height_entry = entries[0], entries[1]
+        center = width_entry.block.center
+
+        matched_room = None
+        for room in rooms:
+            polygon_px = room["polygon_px"]
+            if len(polygon_px) < 3:
+                continue
+            try:
+                shapely_poly = ShapelyPolygon(polygon_px)
+            except Exception:
+                continue
+            if shapely_poly.contains(ShapelyPoint(center)):
+                matched_room = room
+                break
+
+        if matched_room is None:
+            results.append(_fallback_dimension_dict(width_entry))
+            results.append(_fallback_dimension_dict(height_entry))
+            continue
+
+        xs = [p[0] for p in matched_room["polygon_px"]]
+        ys = [p[1] for p in matched_room["polygon_px"]]
+        min_x, max_x, min_y, max_y = min(xs), max(xs), min(ys), max(ys)
+        mid_y = (min_y + max_y) / 2
+        mid_x = (min_x + max_x) / 2
+
+        results.append({
+            "value": width_entry.dimension_value,
+            "start": (min_x, mid_y),
+            "end": (max_x, mid_y),
+            "label": width_entry.block.text.strip(),
+            "confidence": round(width_entry.block.confidence, 3),
+            "matched_to_geometry": True,
+        })
+        results.append({
+            "value": height_entry.dimension_value,
+            "start": (mid_x, min_y),
+            "end": (mid_x, max_y),
+            "label": height_entry.block.text.strip(),
+            "confidence": round(height_entry.block.confidence, 3),
+            "matched_to_geometry": True,
+        })
+
+    return results
+
+
+def _fallback_dimension_dict(ct: ClassifiedText) -> dict:
+    """Shared fallback shape used when a pair component can't be matched to any room."""
+    center = ct.block.center
+    half_width = max(10.0, (ct.block.bbox_max[0] - ct.block.bbox_min[0]) / 2)
+    return {
+        "value": ct.dimension_value,
+        "start": (center[0] - half_width, center[1]),
+        "end": (center[0] + half_width, center[1]),
+        "label": ct.block.text.strip(),
+        "confidence": round(ct.block.confidence * 0.6, 3),
+        "matched_to_geometry": False,
+    }

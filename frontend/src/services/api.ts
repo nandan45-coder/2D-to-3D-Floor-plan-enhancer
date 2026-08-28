@@ -164,6 +164,7 @@ export interface DetectionSummary {
   dimension_count: number;
   calibration_source: string | null;
   notes: string | null;
+  ocr_backend: string | null;
 }
 
 export interface DetectionStatusResponse {

@@ -10,7 +10,7 @@ Running log of completed, in-progress, and pending work. Updated after every pro
 | Phase | Days | Status |
 |---|---|---|
 | 1. Foundation | 1–2 | 🟢 Complete (4 of 4 prompts) |
-| 2. AI Detection | 3–5 | 🟡 In Progress (Prompt 7 done — 3 of 4 complete) |
+| 2. AI Detection | 3–5 | 🟢 Complete (4 of 4 prompts) |
 | 3. Manual Correction | 6–8 | ⬜ Not Started |
 | 4. 2D → 3D | 9–14 | ⬜ Not Started |
 | 5. Walkthrough + Visuals | 15–17 | ⬜ Not Started |
@@ -23,6 +23,391 @@ Running log of completed, in-progress, and pending work. Updated after every pro
 ---
 
 ## Prompt Log
+
+### Out-of-sequence fix — Door false-positive correction + OCR backend visibility (after window bracket fix)
+
+Not a numbered prompt. Continuation of the same investigation session as the window bracket fix,
+following up on two remaining items from that conversation: (1) the user's dimension-count
+discrepancy (8 vs. 18) needed a way to diagnose without guessing, and (2) doors were explicitly
+flagged as "likely undercounted, not yet investigated" and deserved the same rigorous treatment
+windows got.
+
+```
+STATUS
+- Trigger: continuing the user's real-world accuracy investigation. Two threads: (a) user's
+  local result showed dimension_count=8 vs. this environment's 18, with no way to tell why
+  without inspecting server internals; (b) doors had an open, explicitly-flagged gap from the
+  window investigation that hadn't been followed up on yet.
+- Part 1 -- OCR backend visibility:
+  - Files modified:
+    - backend/app/schemas/detection.py: added `ocr_backend` to DetectionSummary.
+    - backend/app/api/routes/detection.py: surfaced `extra.get("ocr_backend")` (already computed
+      since Prompt 6, just not exposed) into the summary response.
+    - frontend/src/services/api.ts: added `ocr_backend` to the DetectionSummary TS type.
+    - frontend/src/pages/Upload/Upload.tsx: displays "OCR: tesseract" (or "easyocr") next to the
+      "Detection complete" heading.
+  - Rationale: attempted to install easyocr in this environment to directly test whether it
+    changes dimension-parsing behavior (my code's dimension/room-keyword parsing logic is
+    OCR-backend-agnostic in principle, but Tesseract-specific word-grouping logic in
+    ocr_service.py's _try_tesseract() only ever runs for Tesseract -- EasyOCR's own internal line
+    grouping could plausibly produce different results). Installation failed: insufficient disk
+    space in this sandbox for the ~2GB+ PyTorch dependency. Rather than guess at EasyOCR's exact
+    behavior without being able to verify it, made the discrepancy diagnosable instead -- the
+    user (or a future debugging session) can now see directly which backend produced a given
+    result without a separate API call.
+  - This remains an open, honestly-flagged gap: whether EasyOCR's output actually causes the
+    user's lower dimension count, and whether the parsing logic needs updating for it, is
+    UNVERIFIED, not fixed.
+- Part 2 -- Door false-positive investigation and fix:
+  - Investigation: overlaid detected door positions on the real test image (same methodology as
+    the window investigation). Initially suspected two problems (a missing main-entrance door, a
+    suspicious top-wall door) -- the "missing" entrance turned out to be a misreading of a
+    crowded overlay image (it was correctly detected all along, confirmed by re-checking exact
+    pixel coordinates); only one real problem was confirmed: a window on the left exterior wall
+    was being misclassified as a door.
+  - Root cause, confirmed by direct pixel inspection: the gap-based door heuristic's swing-leaf
+    search found a short (10.8px) off-axis line fragment near this window's gap and treated it as
+    a door swing indicator. That fragment is almost certainly a corner artifact of the window's
+    own bracket-mark geometry (the same symbol characterized in the window bracket fix), not a
+    real swing arc.
+  - First attempted fix (leaf-fragment COUNT threshold) was tested against real measured data
+    from every detected door and explicitly REJECTED before writing any fix code: the false
+    positive had 2 nearby fragments at one endpoint, while a genuine, correctly-detected entrance
+    door had only 1 fragment total. A count-based threshold would have broken a real detection
+    without even fixing the false positive -- caught by testing the hypothesis against real data
+    first rather than assuming a plausible-sounding heuristic would generalize.
+  - Actual fix: backend/app/cv/detector.py -- added _reclassify_doors_near_window_brackets().
+    Cross-references gap-based door detections against the already-trusted window bracket
+    detections (added in the prior fix): a door whose position on a wall closely coincides
+    (within 0.08 normalized position) with a confirmed bracket on the SAME wall is reclassified
+    as a window rather than counted as a separate/duplicate detection. Naturally scoped to
+    exterior walls only, since bracket_candidates never exist on interior walls -- interior door
+    detections are completely unaffected.
+  - backend/tests/test_detection.py: 5 new tests -- reclassification when close, no
+    reclassification when far, no reclassification across different walls (even at an identical
+    position value), confirmation that existing window entries are never touched by this
+    function, and an end-to-end real-image regression test.
+- Tests executed: pytest backend/tests/ (full suite) -- 99 passed (94 previous + 5 new). Re-
+  verified cottage/studio synthetic samples produce byte-identical results to before (rooms,
+  walls, doors, windows, stairs all unchanged) -- confirms zero impact on non-affected cases.
+  Live HTTP end-to-end check via a fresh backend + real upload, matching direct pipeline output
+  exactly, including the new ocr_backend field.
+- Tests passed: 99/99
+- Measured impact on the real test image (fl-1.jpg), this fix only:
+  - Doors: 6 -> 5 (false positive removed)
+  - Windows: 10 -> 11 (correctly gained, not duplicated -- confirms the reclassify-then-dedup
+    ordering works as intended)
+  - Everything else unchanged (rooms=7, walls=23, stairs=1, dimensions=18)
+- Known issues:
+  - EasyOCR compatibility is still unverified (see Part 1) -- flagged, not resolved, pending
+    either more disk space in a future environment or the user testing directly and reporting
+    the `ocr_backend` value along with their dimension count.
+  - Doors may still be undercounted for reasons unrelated to this specific false positive (e.g.
+    a decorative/non-arc door symbol convention not yet characterized, similar in spirit to how
+    windows had a whole separate bracket-symbol convention). Not investigated further -- this
+    fix addressed the one concretely confirmed problem, not an exhaustive door audit.
+  - The 0.08 position-tolerance constant for the door/bracket cross-check was chosen to
+    comfortably cover the one confirmed real case (measured gap: ~0.065-0.074 depending on which
+    nearby bracket) without being so loose it could misfire elsewhere; not exhaustively tuned
+    against multiple real examples the way the window bracket size thresholds were, since only
+    one confirmed instance of this specific problem was found.
+- Documentation updated: docs/DEVELOPMENT_STATUS.md (this entry)
+- Recommended next action: proceed to Prompt 9 (Analyze and Design the 2D Correction Editor,
+  first prompt of Phase 3) as previously planned.
+```
+
+---
+
+### Out-of-sequence fix — Window bracket-symbol detection (after Prompt 8)
+
+Not a numbered prompt. Follow-up to Prompt 8's accuracy report, where the user asked directly
+whether detection accuracy justified moving to a trained ML model. Investigated the flagged
+windows gap (4 detected vs. ~10+ visible) before answering that question, found a structural
+(not tunable) cause, and fixed it with a bounded classical-CV addition rather than jumping to ML.
+
+```
+STATUS
+- Trigger: user asked "is detection correct, and should we train an ML model instead?" after
+  reviewing the Prompt 8 accuracy report. Investigated the windows undercount specifically
+  (previously flagged but not root-caused) before answering, since an honest answer required
+  evidence, not a guess.
+- Investigation: overlaid detected door/window positions on the real test image, then zoomed
+  into the source pixels at several suspected-window locations along the exterior walls.
+  Confirmed visually: most windows in this real floor plan are drawn as a small bracket/step-
+  shaped mark positioned OUTSIDE the wall line, not as a gap/break IN the wall line. This is a
+  structurally different signal from what detect_openings() (Prompt 6) looks for -- no amount of
+  tuning the existing gap-based heuristic could ever find this convention, since it doesn't
+  create a gap at all. This finding directly informed the ML-model question: SOME gaps (stairs,
+  wall fragmentation, fixed in Prompt 8) were tunable heuristic bugs; this one was a genuine
+  strategy-level blind spot -- but still classically solvable (detecting the bracket shape
+  itself), so a full trained model was not yet justified.
+- Files modified:
+  - backend/app/cv/detector.py: added detect_window_brackets() and
+    _deduplicate_window_brackets(). Searches a thin band just outside each exterior wall
+    (outward direction determined via the building's own bounding-box center) for small,
+    isolated bracket-shaped contours, distinct from the existing gap-based detect_openings().
+    A real calibration bug was found and fixed while building this: the first filter attempt
+    required both bounding-box dimensions to independently fall in an 8-40px range, which
+    rejected the real marks (measured at ~17-25px deep x 7-8px along-wall) while some noise
+    fragments coincidentally passed. Fixed by using orientation-aware depth-vs-along-wall
+    thresholds derived from actually measuring the real marks' contours, not assumed
+    proportions from a single zoomed crop. Wired into run_detection_pipeline(): bracket
+    candidates are converted to OpeningDetection entries and merged with gap-based detections
+    before the existing deduplication pass, so both sources flow through the same downstream
+    confidence-scoring and assembly code.
+  - backend/tests/test_detection.py: 4 new tests -- no-false-positives-on-clean-synthetic-
+    samples, exterior-only search scope, fragment deduplication, and an end-to-end real-image
+    regression test (skips gracefully if the optional fixture isn't present).
+  - docs/DEVELOPMENT_STATUS.md (this entry)
+- Tests executed: pytest backend/tests/ (full suite) -- 94 passed (90 previous + 4 new), no
+  regressions. Re-verified cottage/studio synthetic samples produce byte-identical counts to
+  before this fix (rooms/walls/doors/stairs unchanged, windows unchanged at 1 and 0
+  respectively) -- confirms zero false positives introduced. Live HTTP end-to-end check via a
+  fresh backend + real upload, matching direct pipeline output exactly.
+- Measured impact on the real test image (fl-1.jpg), this fix only:
+  - Windows: 4 -> 10 (found 5 real bracket marks on the left exterior wall alone, matching a
+    direct visual count of that wall; 1 more on the bottom wall)
+  - Everything else unchanged (rooms=7, walls=23, doors=6, stairs=1, dimensions=18)
+- Known issues:
+  - The right exterior wall produced 0 bracket detections despite appearing visually similar at
+    a glance -- closer inspection showed that region actually contains the perimeter dimension
+    callout line's tick marks (a different feature), not window brackets. Whether the right
+    wall's rooms genuinely have no windows, or use yet another drawn convention not yet
+    characterized, was not determined. Not investigated further in this pass.
+  - Top and bottom exterior walls have very little room (10-15px) to search outward before
+    hitting the image edge, since the source image's margin is tight -- bracket detection on
+    those walls is inherently less reliable than on the left/right walls, which have a full
+    ~70-90px margin. Not addressed; noted as a limitation of this specific source image rather
+    than the algorithm.
+  - Doors were flagged in the Prompt 8 report as "likely undercounted, not yet investigated" --
+    still not investigated in this pass; this fix was scoped to windows specifically since that
+    was the more clearly evidenced gap.
+- Documentation updated: docs/DEVELOPMENT_STATUS.md (this entry)
+- Recommended next action: proceed to Prompt 9 (Analyze and Design the 2D Correction Editor,
+  first prompt of Phase 3) as previously planned. A door-detection investigation, similar in
+  spirit to this one, would be a reasonable candidate for a future out-of-sequence pass if
+  real-world testing during/after Phase 3 surfaces further evidence, but is not blocking.
+```
+
+---
+
+### Prompt 8 — Test and Fix AI Detection (closes Phase 2)
+
+```
+PROMPT STATUS
+- Prompt number: 8
+- Status: Complete
+- Files created: None
+- Files modified:
+  - backend/app/cv/detector.py:
+    1. detect_walls() signature changed: now returns a 4-tuple
+       (walls, opening_candidates, thin_line_candidates, reclassified_stairs)
+       instead of 3. Added _reclassify_dense_wall_clusters_as_stairs() and
+       its clustering helper _cluster_by_proximity_and_overlap(): a real
+       staircase hatch pattern in a real (non-synthetic) floor plan
+       partially survived wall-isolation and was being consolidated into
+       several irregularly-spaced short "walls" floating mid-room, which
+       failed detect_stairs()'s strict evenly-spaced-tread check (tuned for
+       clean synthetic tread lines). This is a looser, different check
+       (compactness + count, not spacing regularity) that reclassifies such
+       clusters as a stair region instead. A real bug was found and fixed
+       while building this: perpendicular-proximity-only clustering chained
+       through an unrelated wall elsewhere in the house that happened to
+       sit at a similar coordinate but a totally different along-axis
+       range, silently preventing any reclassification -- fixed by
+       requiring along-axis range overlap in addition to proximity.
+    2. Added snap_wall_endpoints_to_junctions(): implements endpoint
+       snapping, which docs/DETECTION_PIPELINE.md Section 8 specified but
+       had never actually been coded (confirmed via direct code search
+       before implementing -- zero matches for "snap" anywhere in the file).
+       Found by rendering and visually inspecting the wall mask used for
+       room-contour extraction on the real test image and seeing walls stop
+       just short of the perpendicular wall they should meet. Verified
+       actually mutating wall geometry (21 of 29 walls adjusted on the real
+       test image), though it did not by itself change room count on that
+       specific image -- see Known issues below for why.
+    3. run_detection_pipeline() updated for the new detect_walls() return
+       shape and to merge reclassified-from-walls stairs with the
+       separately-detected ones.
+  - backend/tests/test_detection.py: all 15 existing detect_walls() call
+    sites updated for the new 4-tuple return (mechanical, via sed). Added
+    11 new tests: 5 for stair reclassification (including the exact
+    real-world coordinates that triggered the chaining bug, and a
+    regression test confirming the unrelated wall is no longer pulled in),
+    3 for endpoint snapping, 1 end-to-end confirmation that the real
+    image's stair count goes from 0 to 1 after these fixes (skips
+    gracefully if the optional tests/fixtures/fl-1.jpg isn't present, same
+    pattern as the calibration regression test added in the prior
+    out-of-sequence fix).
+  - docs/DEVELOPMENT_STATUS.md (this entry)
+- Tests executed:
+  - pytest backend/tests/ (full suite) -- 90 passed (82 previous + 8 new;
+    note the "8 new" here differs slightly from the "11 new" described
+    above because 3 of the 11 were added and counted in this same pass
+    together with cleanup of a leftover unused helper function)
+  - Direct pipeline runs (outside pytest) on all 3 varied sample floor
+    plans (cottage: clean synthetic 2-room; studio: clean synthetic
+    1-room; fl-1.jpg: real-world 11-room photo/scan) before and after each
+    fix, to confirm actual measured impact rather than assumed impact
+  - Visual verification: rendered and inspected the preprocessed binary
+    image for all 3 samples (correct orientation, no corruption, 0deg
+    rotation applied to all three since all were already axis-aligned);
+    rendered and inspected the wall mask used for room-contour extraction
+    before and after the stair-reclassification and endpoint-snapping
+    fixes; rendered a color-coded room-detection overlay on the real image
+    to precisely identify which specific rooms remain merged and why
+    (see Known issues)
+  - Live HTTP verification: booted the real backend, uploaded the real
+    fl-1.jpg through the actual /upload endpoint (not just calling the
+    pipeline function directly), confirmed the response exactly matches
+    direct pipeline output (7 rooms, 23 walls, 6 doors, 4 windows, 1 stair,
+    18 dimensions, calibration_source=ocr_dimension_match)
+  - npm run build (frontend) -- clean, 102 modules (no frontend files
+    changed this prompt; confirms nothing else regressed it)
+- Tests passed: 90/90
+- Measured impact on the real test image (fl-1.jpg), this prompt only:
+  - Walls: 29 -> 23 (removed 6 phantom stair-tread "walls")
+  - Rooms: 6 -> 7 (one more room correctly enclosed once the phantom
+    mid-room walls were removed)
+  - Stairs: 0 -> 1 (correctly found via reclassification)
+  - 21 of 29 walls had at least one endpoint adjusted by snapping (verified
+    by direct before/after coordinate comparison), independent of the
+    stair fix
+- Known issues (documented per this prompt's explicit instruction to
+  document limitations rather than over-engineer a fix):
+  - **Room count is still undercounted on the real image (7 detected vs.
+    ~11 visible), and the root cause is now precisely diagnosed, not
+    vague.** Overlaying detected room polygons on the source image showed
+    exactly which rooms remain merged (Bed room+Bathroom on one side,
+    Bathroom+Bed room on the other, common Bathroom+guest room) and
+    tracing one of these cases down to pixel level found the exact cause:
+    **the dividing wall's own drawn line does not extend all the way to
+    the corner it should meet, because a door is drawn immediately at that
+    corner with no wall segment before it for the gap-bridging logic to
+    connect to.** This was visually confirmed (not assumed) by zooming into
+    the source image at that exact location. This is a genuine limitation
+    of the current room-boundary-closure approach for this specific (but
+    architecturally common) door-at-corner placement, not a simple
+    off-by-one bug -- fixing it generally would require either a much
+    larger endpoint-snap tolerance (risking false-positive snapping of
+    genuinely separate walls elsewhere) or door-aware wall-extension logic
+    that doesn't exist yet. Deliberately not attempted in this pass per the
+    "do not over-engineer, document instead" instruction. Phase 3's manual
+    correction editor is the intended way for a user to close this specific
+    kind of gap by hand.
+  - The "common" + "Bathroom" two-line label still doesn't merge into one
+    room name (carried over from the prior out-of-sequence fix; still
+    low-priority/cosmetic, the room still gets correctly typed).
+  - PDF upload remains implemented but untested end-to-end (no sample PDF
+    available) -- carried over from Prompts 6/7.
+  - No Alembic migrations (carried over from Prompts 2/4/7) -- Project's
+    schema has not changed in this prompt, so no new dev.db reset is
+    required after this one specifically.
+- Documentation updated: docs/DEVELOPMENT_STATUS.md (this entry, and Phase
+  2 marked complete in the progress table). docs/DETECTION_PIPELINE.md was
+  reviewed but not changed -- endpoint snapping was already specified there
+  (Section 8); this prompt closed the gap between that spec and the actual
+  code, it didn't change the design.
+- Dependencies for next prompt: None blocking. Phase 2 (AI Detection) is
+  now fully complete. Prompt 9 (Analyze and Design the 2D Correction
+  Editor, first prompt of Phase 3) can begin -- it should treat the
+  documented room-merging limitation above as a concrete case the
+  correction editor needs to handle well (splitting a merged region back
+  into two rooms along a hand-drawn or corrected wall).
+- Recommended next action: Proceed to Prompt 9 — Analyze and Design the 2D
+  Correction Editor (first prompt of Phase 3).
+```
+
+---
+
+### Out-of-sequence fix — Real-world detection accuracy (between Prompts 7 and 8)
+
+Not a numbered prompt. Triggered by the user manually testing the live upload flow (Prompt 7)
+against a real, non-synthetic floor plan image (`fl-1.jpg`, an 11-room house layout) and asking
+for a detection-quality report. Logged here explicitly, out of sequence, per the standing practice
+of flagging any work done outside the formal 40-prompt order.
+
+```
+STATUS
+- Trigger: user uploaded a real floor plan through the live app and asked for an assessment of
+  detection quality. Investigated by running the real image directly through the pipeline
+  (not just reading the frontend summary), which surfaced two concrete, root-caused bugs beyond
+  what the synthetic Prompt 6 fixtures had ever exercised.
+- Files modified:
+  - backend/app/ocr/ocr_service.py:
+    1. ROOM_TYPE_KEYWORDS expanded: added "guest room", "drawing room" (common South Asian
+       English term for a living/reception room), "passage" (hallway synonym), "utility"
+       (mapped to laundry), "common bathroom"/"attached bathroom" variants. All four of the
+       first three were confirmed, via direct inspection of real OCR output, to be correctly
+       read by Tesseract but classified as kind="other" because the exact terms weren't in the
+       keyword list.
+    2. Added ROOM_SIZE_PAIR_PATTERN and _parse_room_size_pair(): the real image's dimension
+       labels were universally in "W X H" format (e.g. "18' X 8'"), which the original
+       DIMENSION_PATTERN (designed only for a single standalone length, per the Prompt 6
+       synthetic fixture's "24 ft" label) could not parse at all -- 0 dimensions were extracted
+       from the real image before this fix. Also handles Tesseract's confirmed common misread
+       of the foot/prime mark (') as a degree symbol (°) in this context. Deliberately does NOT
+       attempt to guess-correct other garbled OCR (e.g. "14X58", likely a mangled "14' X 5'") --
+       parses it at face value rather than fabricating a "probably intended" reading.
+    3. classify_text_blocks() now expands a detected "W X H" pair into TWO separate dimension
+       entries (width, height), tagged is_pair_component=True, since each represents a genuinely
+       separate real-world measurement.
+    4. Added associate_room_size_dimensions(): a second, distinct association strategy for
+       pair-component dimensions. Discovered mid-fix that parsing the values alone wasn't
+       enough -- room-size labels have no adjacent drawn measurement line the way a perimeter
+       dimension callout does, so the existing associate_dimensions() (nearby-line matching)
+       always fell through to its low-confidence, unmatched fallback for these (confirmed:
+       every parsed value came back at ~0.28 confidence, none feeding calibration). This new
+       function instead matches each width/height value against its OWN containing room's
+       pixel bounding box (found via the same point-in-polygon test already used for room-label
+       association), which is a legitimate, direct calibration reference for this label
+       convention. associate_dimensions() was updated to skip pair-component entries (now
+       handled here instead) rather than double-processing them.
+  - backend/app/cv/detector.py: run_detection_pipeline() now calls both
+    associate_dimensions() and associate_room_size_dimensions(), combining their results before
+    calibration.
+  - backend/tests/test_detection.py: 8 new tests, including two direct regression tests using
+    real strings/values captured verbatim from OCR run against the actual uploaded image (not
+    invented test data), and one full end-to-end test against the real image itself (skips
+    gracefully if the optional local fixture isn't present -- see below).
+  - backend/tests/fixtures/fl-1.jpg: the user's real test image, added as an optional local
+    regression fixture (not a synthetic sample; gitignored status left to the user's discretion
+    since it's their own uploaded content, not a generated fixture like Prompt 6's samples).
+- Tests executed: pytest backend/tests/ (full suite) -- 82 passed (74 previous + 8 new), no
+  regressions. Also re-ran the real image through the pipeline directly (outside pytest) before
+  and after each fix to confirm the actual before/after numbers reported to the user were real,
+  not assumed.
+- Measured impact on the real test image (fl-1.jpg):
+  - Dimensions extracted: 0 -> 18
+  - Dimension confidence: ~0.28 (unmatched fallback) -> ~0.44-0.49 (OCR confidence, matched)
+  - Calibration source: "fallback_default_assumption" (arbitrary guess) -> "ocr_dimension_match"
+    (grounded in 18 real measurements)
+  - Room-type coverage: 4 of 6 detected rooms had a room_type before -> all rooms with a
+    findable label now get one where a keyword exists (Drawing room, Passage, Utility, guest
+    room all newly recognized)
+- Known issues / not fixed by this round:
+  - Room count is still undercounted (6 detected vs. ~11 visible) -- this is a wall-detection/
+    fragmentation issue (29 walls detected, more than the ~15-18 a clean 11-room layout would
+    need), separate from the OCR/parsing issues fixed here. Likely related to the source image's
+    low resolution (447x447, upscaled 1.79x to reach the working minimum). Not investigated
+    further in this pass -- flagged as a distinct follow-up, not silently left unmentioned.
+  - The "common" + "Bathroom" two-line label still doesn't merge into a single "common Bathroom"
+    room name (Tesseract places them on separate lines within the same block). Low priority:
+    the room still gets correctly typed as room_type=bathroom via the second line alone, so this
+    is a cosmetic naming gap, not a functional detection miss. Not fixed in this pass.
+  - "14X58" (garbled OCR, likely a mangled "14' X 5'") still parses at face value as (14, 58)
+    rather than being rejected or corrected -- deliberate, not an oversight (see rationale above).
+    Given calibration uses the median across all matched measurements, one such outlier has
+    bounded impact on the overall scale.
+  - Stairs: 0 detected: still unconfirmed whether this is a genuine miss (there appears to be a
+    hatched region in one bedroom in the source image) or correctly empty. Not investigated.
+- Documentation updated: docs/DEVELOPMENT_STATUS.md (this entry)
+- Recommended next action: proceed to Prompt 8 (Test and Fix AI Detection, closes Phase 2) --
+  the room-undercounting issue flagged above is a good candidate to investigate as part of that
+  prompt's broader testing pass, using both the synthetic fixtures and this real image.
+```
+
+---
 
 ### Prompt 7 — Integrate Detection Pipeline with Backend and Frontend
 

@@ -41,6 +41,7 @@ def _build_summary(floorplan_dict: dict) -> DetectionSummary:
         dimension_count=len(floorplan_dict.get("dimensions", [])),
         calibration_source=extra.get("calibration_source"),
         notes=metadata.get("notes"),
+        ocr_backend=extra.get("ocr_backend"),
     )
 
 

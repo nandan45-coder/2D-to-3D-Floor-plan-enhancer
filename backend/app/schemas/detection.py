@@ -25,6 +25,9 @@ class DetectionSummary(BaseModel):
     dimension_count: int
     calibration_source: Optional[str] = None
     notes: Optional[str] = None
+    ocr_backend: Optional[str] = None  # "tesseract" | "easyocr" | "none" -- exposed so OCR-related
+    # discrepancies between environments (e.g. dimension count differing depending on which
+    # backend actually ran) are immediately diagnosable without a separate API call
 
 
 class DetectionUploadResponse(DetectionStatusResponse):

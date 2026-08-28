@@ -236,6 +236,11 @@ export default function Upload() {
           <div className="flex items-center gap-2">
             <span className="h-2 w-2 rounded-full bg-approved" />
             <p className="font-display text-sm font-semibold text-ink">Detection complete</p>
+            {result.summary.ocr_backend && (
+              <span className="ml-auto font-mono text-[10px] uppercase tracking-wider text-graphite-faint">
+                OCR: {result.summary.ocr_backend}
+              </span>
+            )}
           </div>
 
           <dl className="mt-5 grid grid-cols-2 gap-4 sm:grid-cols-3">
