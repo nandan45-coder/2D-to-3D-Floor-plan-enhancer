@@ -1,0 +1,41 @@
+# Docker setup (Prompt 39; docs/DEPLOYMENT.md). From the project root:
+#   copy docker/deploy.env.example to docker/deploy.env and fill it in, then
+#   docker compose up -d --build        -> the website on http://localhost:8080 (HTTP_PORT to change)
+name: floorplan-3d
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: docker/backend.Dockerfile
+    image: floorplan-3d-backend
+    env_file:
+      - path: docker/deploy.env
+        required: false
+    environment:
+      # fixed for the container (deploy.env cannot change these)
+      APP_ENV: production
+      DATABASE_URL: sqlite:////data/app.db
+      STORAGE_PATH: /data/uploads
+    volumes:
+      - app-data:/data
+    expose:
+      - "8000"          # reachable only from the website container, never from outside
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/frontend.Dockerfile
+      args:
+        VITE_API_BASE_URL: /api
+    image: floorplan-3d-frontend
+    ports:
+      - "${HTTP_PORT:-8080}:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  app-data:             # database, uploaded plans, avatars, 3D snapshots

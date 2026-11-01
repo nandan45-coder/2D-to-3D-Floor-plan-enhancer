@@ -2,25 +2,48 @@
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
 pydantic==2.10.4
-pydantic-settings==2.10.1
+pydantic-settings==2.7.1
 SQLAlchemy==2.0.36
+# UI-2: database migrations (users, sessions, project owners); run automatically at startup. Passwords are hashed
+# with scrypt from Python's standard library (no extra package).
+alembic==1.14.0
+# UI-5: the estimation and project-report PDFs (pure Python; built-in fonts)
+reportlab==4.4.10
 psycopg2-binary==2.9.10
 python-dotenv==1.0.1
 python-multipart==0.0.20
 
-opencv-python-headless==4.13.0.92
+# Detection pipeline -- Prompt 6 (Phase 2): classical CV (walls, rooms, stairs)
+opencv-python==4.13.0.92
 numpy==2.4.4
 Pillow==12.1.1
 shapely==2.1.2
-pytesseract==0.3.13   # offline OCR fallback -- requires the `tesseract-ocr` system package
+pytesseract==0.3.13   # OCR, the main engine -- requires the Tesseract program (docs/SETUP_GUIDE.md step 3)
 PyMuPDF==1.28.2        # PDF rasterization (first page only, per DETECTION_PIPELINE.md)
-# easyocr is intentionally NOT pinned here yet: it pulls in a full PyTorch
-# dependency and downloads model weights on first use, both impractical to
-# verify in this environment. ocr_service.py already tries `import easyocr`
-# first and falls back to pytesseract automatically -- add `easyocr` to this
-# file whenever a network-enabled deployment target needs the primary path
-# exercised. See docs/DEVELOPMENT_STATUS.md's Prompt 6 entry for details.
+# Prompt 39A: Tesseract is the OCR engine. EasyOCR is an OPTIONAL fallback for machines where Tesseract does not
+# work -- install it with:  pip install -r requirements-easyocr.txt  (ocr_service.py uses it only then).
+
+# Tier 1 detector -- YOLO doors + windows (post-Phase-2 enhancement)
+# Loads models/detection/best.pt (repo root). Pulls in PyTorch (large download).
+# Optional at runtime: if ultralytics/torch or best.pt is missing, detection falls
+# back to classical CV automatically. CPU-only machines can install the smaller
+# CPU build of torch FIRST, then this file:
+#   pip install torch==2.13.0 torchvision==0.28.0 --index-url https://download.pytorch.org/whl/cpu
+# (2.13.0 / 0.28.0 = the versions tested on the project PC; docker/backend.Dockerfile installs exactly these)
+ultralytics==8.4.163   # Prompt 39A: pinned to the version tested on the project PC (installs the same in months)
+
+# 2D editor (Prompt 10): no new Python packages -- the source-image route uses
+# opencv-python + PyMuPDF (above); the editor itself is frontend-only
+# (konva + react-konva, see frontend/package.json).
+
+# Sustainability (Phase 8): the building's room graph (rooms + doors). Previously only installed indirectly
+# through PyTorch; pinned explicitly from Prompt 30. Needs Python >= 3.11 (as numpy 2.4 does).
+networkx==3.6.1
+
+# LLM assistant (Prompt 22): providers (OpenAI, Gemini) are called over HTTPS with httpx -- no provider
+# SDKs; without an API key the assistant runs offline. httpx is now a runtime dependency (also used
+# by FastAPI's TestClient).
+httpx==0.28.1
 
 # Testing
 pytest==8.3.4
-httpx==0.28.1

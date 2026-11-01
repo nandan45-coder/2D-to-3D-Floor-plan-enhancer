@@ -1,0 +1,24 @@
+# Keep secrets, user data, build output and caches out of the Docker build (Prompt 39)
+.git
+**/.env
+**/.env.*
+docker/deploy.env
+**/*.db
+**/*.sqlite3
+**/node_modules
+**/.venv
+**/venv
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/.coverage
+**/htmlcov
+**/*.log
+backend/data
+backend/tests
+frontend/dist
+data
+docs
+tests
+assets
+scripts

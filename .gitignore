@@ -51,3 +51,8 @@ chroma_db/
 # Temporary files
 *.tmp
 *.temp
+
+# Prompt 39: local databases, user files and the Docker secrets file
+*.db
+backend/data/
+docker/deploy.env
