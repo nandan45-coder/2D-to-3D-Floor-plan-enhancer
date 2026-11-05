@@ -75,12 +75,21 @@ def check_database_connection() -> bool:
 
 def init_db() -> None:
     """
-    Create all tables registered on Base.metadata.
-
-    This is an MVP convenience (no migration tool wired up yet). If/when
-    Alembic or another migration tool is introduced, this call should be
-    replaced by running migrations instead.
+    Bring the database schema up to date by running the Alembic migrations (UI-2; backend/migrations/versions).
+    Works for a fresh database and for one created before Alembic (the baseline creates only missing tables).
     """
+    from pathlib import Path
+
+    from alembic import command
+    from alembic.config import Config
+
     from app import models  # noqa: F401  -- ensures models are registered on Base.metadata
 
-    Base.metadata.create_all(bind=engine)
+    root = Path(__file__).resolve().parents[2]          # the backend folder
+    cfg = Config(str(root / "alembic.ini"))
+    cfg.set_main_option("script_location", str(root / "migrations"))
+    cfg.set_main_option("sqlalchemy.url", settings.database_url)
+    cfg.attributes["skip_logging"] = True               # keep the app's logging configuration
+    with engine.begin() as connection:
+        cfg.attributes["connection"] = connection
+        command.upgrade(cfg, "head")
